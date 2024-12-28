@@ -1,13 +1,55 @@
 import {
+    composeContext,
     elizaLogger,
+    generateMessageResponse,
+    generateText,
     HandlerCallback,
     IAgentRuntime,
     Memory,
+    messageCompletionFooter,
+    ModelClass,
     State,
     type Action,
 } from "@elizaos/core";
 
 const BASE_URL = "https://api.0xscope.com/v2";
+
+const messageHandlerTemplate =
+    // {{goals}}
+    `# Action Examples
+{{actionExamples}}
+(Action examples are for reference only. Do not use the information from them in your response.)
+
+# report : {{detailedPrompt}}
+
+# Knowledge
+{{knowledge}}
+
+# Task: Generate dialog and actions for the character {{agentName}}.
+About {{agentName}}:
+{{bio}}
+{{lore}}
+
+Examples of {{agentName}}'s dialog and actions:
+{{characterMessageExamples}}
+
+{{providers}}
+
+{{attachments}}
+
+{{actions}}
+
+# Capabilities
+Note that {{agentName}} is capable of reading/seeing/hearing various forms of media, including images, videos, audio, plaintext and PDFs. Recent attachments have been included above under the "Attachments" section.
+
+{{messageDirections}}
+
+{{recentMessages}}
+
+# Task: Generate a post/reply of the above report in the voice, style and perspective of {{agentName}} (@{{twitterUserName}}) while using the thread of tweets as additional context:
+
+let's generate message for normal chat text box with the above report.
+`;
 
 interface AnalysisResult {
     identityData?: any;
@@ -231,13 +273,22 @@ ${socialData?.data
 function formatRelatedAddresses(related: any): string {
     if (!related?.data) return "No related addresses found";
 
-    return `• Connected Addresses: ${related?.data.length}
-${related?.data
-    .slice(0, 3)
-    .map((relatedData: any) => {
-        return `address : ${relatedData.address} , certainty : ${relatedData.certainty} , description : ${relatedData.description}`;
-    })
-    .join("\n")}`;
+    let output = "";
+    if (related?.data?.length > 0) {
+        output += `\nRelated Addresses (Top 10 by certainty):\n`;
+        const sortedAddresses = [...related?.data]
+            .sort((a, b) => b.certainty - a.certainty)
+            .slice(0, 10);
+
+        for (const addr of sortedAddresses) {
+            output += ` - ${addr.address}\n`;
+            output += `   Certainty: ${addr.certainty}%\n`;
+            if (addr.description?.length > 0) {
+                output += `   Relationship: ${addr.description.join(", ")}\n`;
+            }
+        }
+    }
+    return output;
 }
 
 function formatRiskSection(riskAnalysis: RiskAnalysis): string {
@@ -298,7 +349,7 @@ export const addressAnalysisAction: Action = {
         return Boolean(secretKey);
     },
     description:
-        "Performs comprehensive blockchain address analysis using 0xScope (Breadcrumbs) API",
+        "Performs comprehensive blockchain address analysis using 0xScope API",
     handler: async (
         runtime: IAgentRuntime,
         message: Memory,
@@ -325,6 +376,13 @@ export const addressAnalysisAction: Action = {
             const chainMatch = message.content.text.match(/chain=(\w+)/i);
             const chain = chainMatch ? chainMatch[1].toLowerCase() : "ethereum";
 
+            // Initialize or update state
+            if (!_state) {
+                _state = (await runtime.composeState(message)) as State;
+            } else {
+                _state = await runtime.updateRecentMessageState(_state);
+            }
+
             // 1) Perform the analysis
             const analysisResult = await analyzeAddress(
                 chain,
@@ -339,11 +397,24 @@ export const addressAnalysisAction: Action = {
                 analysisResult
             );
 
-            // 3) Optionally pass `detailedPrompt` to an LLM for natural language analysis
-            // const llmAnalysis = await yourLLM(detailedPrompt);
+            const context = composeContext({
+                state: {
+                    ..._state,
+                    detailedPrompt,
+                },
+                template: messageHandlerTemplate,
+            });
+
+            const response = await generateText({
+                runtime: runtime,
+                context: context,
+                modelClass: ModelClass.SMALL,
+            });
 
             // Return or display the final result
-            await callback({ text: detailedPrompt });
+            await callback({
+                text: response,
+            });
             return {
                 raw: analysisResult,
                 formatted: detailedPrompt,
@@ -366,7 +437,7 @@ export const addressAnalysisAction: Action = {
                 user: "{{user2}}",
                 content: {
                     text: "Here's the analysis report for the address...",
-                    action: "ADDRESS_ANALYSIS",
+                    action: "CONTINUE",
                 },
             },
         ],

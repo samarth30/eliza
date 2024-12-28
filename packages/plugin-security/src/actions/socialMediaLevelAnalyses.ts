@@ -44,28 +44,28 @@ interface TwitterActivity {
 interface TwitterRecord {
     id: string;
     author_id: string;
-    attachments?: string;
-    source?: string | null;
-    lang?: string;
+    attachments: string | null;
+    source: string | null;
+    lang: string;
     tweets: string;
     conversation_id: string;
-    in_reply_to_user_id?: string | null;
-    reply_settings?: string;
-    context_annotations?: string | null;
+    in_reply_to_user_id: string | null;
+    reply_settings: string;
+    context_annotations: string | null;
     public_metrics: string;
     created_at: string;
     possibly_sensitive: boolean;
-    referenced_tweets_id?: string | null;
-    referenced_tweets_type?: string | null;
-    username?: string;
-    name?: string;
-    profile_image_url?: string;
-    verified?: boolean;
-    referenced_tweets_username?: string | null;
-    retweeted_username?: string | null;
-    retweeted_name?: string | null;
-    retweeted_profile_image_url?: string | null;
-    retweeted_verified?: boolean | null;
+    referenced_tweets_id: string | null;
+    referenced_tweets_type: string | null;
+    username: string;
+    name: string;
+    profile_image_url: string;
+    verified: boolean;
+    referenced_tweets_username: string | null;
+    retweeted_username: string | null;
+    retweeted_name: string | null;
+    retweeted_profile_image_url: string | null;
+    retweeted_verified: boolean | null;
 }
 
 // Add this interface after the TwitterRecord interface
@@ -102,10 +102,16 @@ async function scopeApiCall(
     }
 
     const response = await fetch(url, init);
-    if (!response.ok) {
-        throw new Error(`API call failed: ${response.statusText}`);
+    const data = await response.json();
+
+    // Check both HTTP status and API response code
+    if (!response.ok || data.code !== 0) {
+        throw new Error(
+            `API call failed: ${data.message || response.statusText}`
+        );
     }
-    return response.json();
+
+    return data;
 }
 
 /**
@@ -137,11 +143,6 @@ async function fetchTwitterInfoBatch(
     const endpoint = `/social/twitterInfo_batch`;
     const payload = { addresses, chain };
     const resp = await scopeApiCall(endpoint, secretKey, "POST", payload);
-    if (resp.code !== 0) {
-        throw new Error(
-            `Failed to fetch batch Twitter info: ${resp.message || "Unknown error"}`
-        );
-    }
     return resp.data || [];
 }
 
@@ -175,11 +176,6 @@ async function fetchTwitterRecordsOfficial(
 ): Promise<TwitterRecordsResponse> {
     const endpoint = `/social/twitterRecordsOfficial?address=${address}&chain=${chain}&limit=${limit}&page=${page}`;
     const resp = await scopeApiCall(endpoint, secretKey);
-    if (resp.code !== 0) {
-        throw new Error(
-            `Failed to fetch official Twitter records: ${resp.message || "Unknown error"}`
-        );
-    }
     return resp.data;
 }
 
@@ -195,11 +191,6 @@ async function fetchTwitterRecordsNotOfficial(
 ): Promise<TwitterRecordsResponse> {
     const endpoint = `/social/twitterRecordsNotOfficial?address=${address}&chain=${chain}&limit=${limit}&page=${page}`;
     const resp = await scopeApiCall(endpoint, secretKey);
-    if (resp.code !== 0) {
-        throw new Error(
-            `Failed to fetch non-official Twitter records: ${resp.message || "Unknown error"}`
-        );
-    }
     return resp.data;
 }
 
@@ -246,7 +237,6 @@ async function analyzeTwitterSocial(
             1,
             secretKey
         );
-
         const matchedFromBatch = batchInfo.find(
             (bi) => bi.address?.toLowerCase() === address.toLowerCase()
         );
@@ -330,11 +320,13 @@ function analyzeSocialMediaRisk(
 }
 
 function generateTwitterSocialReport(analysisResults: any[]): string {
-    let report = `
-📱 TWITTER / SOCIAL MEDIA INTELLIGENCE REPORT
-══════════════════════════════════════════════
+    // Escape special characters for markdown
+    const escapeMarkdown = (text: string) => {
+        return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, "\\$&");
+    };
 
-`;
+    let report = `📱 TWITTER / SOCIAL MEDIA INTELLIGENCE REPORT
+═══════════════════════════════════════════════\n`;
 
     for (const item of analysisResults) {
         const {
@@ -347,46 +339,78 @@ function generateTwitterSocialReport(analysisResults: any[]): string {
 
         const riskAnalysis = analyzeSocialMediaRisk(twitterInfo || {});
 
-        report += `
-🔗 Address: ${address}
-──────────────────────────────────────────────
+        report += `🔗 Address: ${escapeMarkdown(address)}
+───────────────────────────────────────────────
 
 📊 Twitter Profile
 ----------------
 ${
     twitterInfo
-        ? `
-• Username: @${twitterInfo.username || "N/A"}
-• Followers: ${twitterInfo.followers_count || "N/A"}
-• Following: ${twitterInfo.following_count || "N/A"}
-• Total Tweets: ${twitterInfo.tweet_count || "N/A"}
-`
+        ? `• Username: @${escapeMarkdown(twitterInfo.username || "N/A")}
+• Followers: ${twitterInfo.followers_count?.toLocaleString() || "N/A"}
+• Following: ${twitterInfo.following_count?.toLocaleString() || "N/A"}
+• Total Tweets: ${twitterInfo.tweet_count?.toLocaleString() || "N/A"}
+• Created: ${twitterInfo.created_at ? new Date(twitterInfo.created_at).toLocaleDateString() : "N/A"}
+• Verified: ${twitterInfo.verified ? "✓ Yes" : "✗ No"}`
         : "No Twitter profile found"
 }
 
 📈 Activity Overview
 -----------------
 ${
-    activityChart && activityChart.length > 0
-        ? activityChart
+    activityChart && activityChart.date && activityChart.date.length > 0
+        ? activityChart.date
               .slice(0, 3)
-              .map((a) => `• ${a.date}: ${a.count} tweets`)
+              .map(
+                  (date, i) =>
+                      `• ${date}: ${activityChart.official_count[i]} official, ${activityChart.other_count[i]} mentions`
+              )
               .join("\n")
         : "No activity data available"
 }
 
-🔵 Official Tweets
+🔵 Recent Activity
 ---------------
 ${
-    officialRecords && officialRecords.length > 0
-        ? officialRecords
-              .slice(0, 2)
-              .map(
-                  (r) =>
-                      `• ${new Date(r.timestamp).toLocaleDateString()}: ${r.content.substring(0, 100)}...`
-              )
+    officialRecords && officialRecords.rows && officialRecords.rows.length > 0
+        ? `Official Tweets (${officialRecords.total.toLocaleString()} total):\n` +
+          officialRecords.rows
+              .slice(0, 3)
+              .map((r) => {
+                  const metrics = JSON.parse(r.public_metrics);
+                  return `• ${new Date(r.created_at).toLocaleDateString()}: ${escapeMarkdown(
+                      r.tweets.length > 100
+                          ? r.tweets.substring(0, 100) + "..."
+                          : r.tweets
+                  )} (${metrics.retweet_count}🔄 ${metrics.like_count}❤️)`;
+              })
               .join("\n")
         : "No official tweets found"
+}
+${
+    notOfficialRecords &&
+    notOfficialRecords.rows &&
+    notOfficialRecords.rows.length > 0
+        ? `\nMentions (${notOfficialRecords.total.toLocaleString()} total):\n` +
+          notOfficialRecords.rows
+              .slice(0, 3)
+              .map((r) => {
+                  const metrics = JSON.parse(r.public_metrics);
+                  const isRetweet = r.referenced_tweets_type === "retweeted";
+                  const prefix = isRetweet ? "🔄 " : "💬 ";
+                  const author = isRetweet
+                      ? r.retweeted_username
+                          ? `@${escapeMarkdown(r.retweeted_username)}`
+                          : escapeMarkdown(r.retweeted_name || "Unknown")
+                      : `@${escapeMarkdown(r.username)}`;
+                  return `• ${prefix}${new Date(r.created_at).toLocaleDateString()} ${author}: ${escapeMarkdown(
+                      r.tweets.length > 100
+                          ? r.tweets.substring(0, 100) + "..."
+                          : r.tweets
+                  )} (${metrics.retweet_count}🔄 ${metrics.like_count}❤️)`;
+              })
+              .join("\n")
+        : "\nNo mentions found"
 }
 
 ⚠️ Risk Assessment
@@ -396,19 +420,20 @@ Risk Level: ${getRiskLevelEmoji(riskAnalysis.level)} ${riskAnalysis.level}
 ${
     riskAnalysis.factors.length
         ? "🚩 Risk Factors:\n" +
-          riskAnalysis.factors.map((f) => `• ${f}`).join("\n")
+          riskAnalysis.factors.map((f) => `• ${escapeMarkdown(f)}`).join("\n")
         : "No significant risk factors identified"
 }
 
 ${
     riskAnalysis.recommendations.length
         ? "💡 Recommendations:\n" +
-          riskAnalysis.recommendations.map((r) => `• ${r}`).join("\n")
+          riskAnalysis.recommendations
+              .map((r) => `• ${escapeMarkdown(r)}`)
+              .join("\n")
         : "No specific recommendations at this time"
 }
 
-═══════════���══════════════════════════════════
-`;
+═══════════════════════════════════════════════\n`;
     }
     return report;
 }

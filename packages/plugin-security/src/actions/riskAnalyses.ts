@@ -13,22 +13,29 @@ const BASE_URL = "https://api.0xscope.com/v2";
  * DATA STRUCTURES
  *****************************************************/
 interface RiskItem {
-    riskName: string;
-    riskType: string;
-    riskLevel: string;
-    riskDescription: string;
-    riskReason: any[];
+    address: string;
+    totalScore: number;
+    highScore: number;
+    mediumScore: number;
+    lowScore: number;
 }
 
 interface RiskBatchResult {
-    address: string;
+    code: number;
     data: RiskItem[];
+    uuid: number;
 }
 
 interface EntityRiskItem {
-    riskLevel: string;
-    reasons: any[];
-    // ... add more fields if needed
+    address: string;
+    certainty: number;
+    riskScore: number;
+}
+
+interface EntityRiskResponse {
+    code: number;
+    data: EntityRiskItem[];
+    uuid: number;
 }
 
 interface RelatedAddress {
@@ -52,11 +59,44 @@ interface RelatedReasonResponse {
  */
 interface RiskEntityAnalysisResult {
     address: string;
-    riskItems?: RiskItem[];
+    riskItem?: RiskItem;
+    riskDetails?: RiskDetail[];
     entityRisk?: EntityRiskItem[];
     relatedAddresses?: RelatedAddress[];
     relatedReasons?: RelatedReasonResponse;
     clusterEntity?: string[][];
+}
+
+interface RiskReason {
+    txhash: string | null;
+    related_addr: string;
+    total_value: number | null;
+    type: string;
+}
+
+interface RiskDetail {
+    riskName: string;
+    riskType: string;
+    riskLevel: string;
+    riskDescription: string;
+    riskReason: RiskReason[];
+}
+
+interface RiskDetailResult {
+    address: string;
+    addressRiskType: RiskDetail[];
+}
+
+interface RiskDetailBatchResponse {
+    code: number;
+    data: RiskDetailResult[];
+    uuid: number;
+}
+
+interface RelatedAddressResponse {
+    code: number;
+    data: RelatedAddress[];
+    uuid: number;
 }
 
 /*****************************************************
@@ -99,20 +139,11 @@ async function fetchRiskScoresBatch(
     addresses: string[],
     chain: string,
     secretKey: string
-): Promise<RiskBatchResult[]> {
+): Promise<RiskBatchResult> {
     const endpoint = `/kye/riskyScoreBatch`;
-    const payload = {
-        addresses,
-        chain,
-    };
-
+    const payload = { addresses, chain };
     const response = await scopeApiCall(endpoint, secretKey, "POST", payload);
-    // response.data might look like:
-    // [
-    //   { address: "0x...", data: [...] },
-    //   { address: "0x...", data: [...] }
-    // ]
-    return response.data || [];
+    return response;
 }
 
 /**
@@ -122,16 +153,11 @@ async function fetchRiskDetailsBatch(
     addresses: string[],
     chain: string,
     secretKey: string
-): Promise<RiskBatchResult[]> {
+): Promise<RiskDetailBatchResponse> {
     const endpoint = `/kye/riskyDetailBatch`;
-    const payload = {
-        addresses,
-        chain,
-    };
-
+    const payload = { addresses, chain };
     const response = await scopeApiCall(endpoint, secretKey, "POST", payload);
-    // Similar structure as risk scores
-    return response.data || [];
+    return response;
 }
 
 /**
@@ -141,11 +167,10 @@ async function fetchEntityRisk(
     address: string,
     chain: string,
     secretKey: string
-): Promise<EntityRiskItem[] | undefined> {
+): Promise<EntityRiskResponse> {
     const endpoint = `/kye/entityRisk?address=${address}&chain=${chain}`;
-    const response = await scopeApiCall(endpoint, secretKey, "GET");
-    // You can tailor how you store response.data
-    return response.data;
+    const response = await scopeApiCall(endpoint, secretKey);
+    return response;
 }
 
 /**
@@ -155,12 +180,10 @@ async function fetchRelatedAddresses(
     address: string,
     chain: string,
     secretKey: string
-): Promise<RelatedAddress[]> {
+): Promise<RelatedAddressResponse> {
     const endpoint = `/entity/relatedAddress?address=${address}&chain=${chain}`;
-    const response = await scopeApiCall(endpoint, secretKey, "GET");
-
-    // The API returns data array containing address, certainty and description
-    return response.data || [];
+    const response = await scopeApiCall(endpoint, secretKey);
+    return response;
 }
 
 /**
@@ -229,15 +252,20 @@ export async function analyzeRiskAndEntities(
     // For each address, fetch entity risk & related addresses
     for (const address of addresses) {
         // riskScoresBatch => find the matching entry
-        const riskScoreItem = riskScoresBatch.find(
-            (r) => r.address.toLowerCase() === address.toLowerCase()
-        );
-        const riskDetailItem = riskDetailsBatch.find(
+        const riskScoreItem = riskScoresBatch?.data?.find(
             (r) => r.address.toLowerCase() === address.toLowerCase()
         );
 
-        const entityRisk = await fetchEntityRisk(address, chain, secretKey);
-        const relatedAddrs = await fetchRelatedAddresses(
+        const riskDetailItem = riskDetailsBatch.data?.find(
+            (r) => r.address.toLowerCase() === address.toLowerCase()
+        );
+
+        const entityRiskResponse = await fetchEntityRisk(
+            address,
+            chain,
+            secretKey
+        );
+        const relatedAddressResponse = await fetchRelatedAddresses(
             address,
             chain,
             secretKey
@@ -245,10 +273,10 @@ export async function analyzeRiskAndEntities(
 
         // Get related reasons for the first few related addresses (to avoid too many API calls)
         const relatedReasons =
-            relatedAddrs.length > 0
+            relatedAddressResponse.data.length > 0
                 ? await fetchRelatedReasons(
                       address,
-                      relatedAddrs[0].address,
+                      relatedAddressResponse.data[0].address,
                       chain,
                       secretKey
                   )
@@ -256,9 +284,10 @@ export async function analyzeRiskAndEntities(
 
         results.push({
             address,
-            riskItems: riskDetailItem?.data || riskScoreItem?.data,
-            entityRisk,
-            relatedAddresses: relatedAddrs,
+            riskItem: riskScoreItem,
+            riskDetails: riskDetailItem?.addressRiskType,
+            entityRisk: entityRiskResponse.data,
+            relatedAddresses: relatedAddressResponse.data,
             relatedReasons,
             clusterEntity: clusterInfo, // Array of address clusters from clusterAddresses
         });
@@ -276,53 +305,82 @@ function generateRiskEntityReport(results: RiskEntityAnalysisResult[]): string {
     for (const item of results) {
         output += `\nAddress: ${item.address}\n--------------------------\n`;
 
-        // Risk Items
-        if (item.riskItems && item.riskItems.length > 0) {
-            output += `Risk Items:\n`;
-            for (const risk of item.riskItems) {
-                output += ` - Name: ${risk.riskName}, Level: ${risk.riskLevel}\n   Desc: ${risk.riskDescription}\n`;
-            }
-        } else {
-            output += `No risk items found.\n`;
+        // Risk Scores
+        if (item.riskItem) {
+            output += `Risk Scores:\n`;
+            output += ` - Total Risk Score: ${item.riskItem.totalScore}\n`;
+            output += ` - High Risk Score: ${item.riskItem.highScore}\n`;
+            output += ` - Medium Risk Score: ${item.riskItem.mediumScore}\n`;
+            output += ` - Low Risk Score: ${item.riskItem.lowScore}\n`;
         }
 
-        // Entity Risk
-        if (item.entityRisk && item.entityRisk.length > 0) {
-            output += `\nEntity Risk:\n`;
-            for (const eRisk of item.entityRisk) {
-                output += ` - Level: ${eRisk.riskLevel}, Reasons: ${JSON.stringify(eRisk.reasons, null, 2)}\n`;
+        // Risk Details
+        if (item.riskDetails?.length > 0) {
+            output += `\nRisk Details:\n`;
+            for (const risk of item.riskDetails) {
+                output += ` - ${risk.riskName} (${risk.riskLevel})\n`;
+                output += `   Type: ${risk.riskType}\n`;
+                output += `   Description: ${risk.riskDescription}\n`;
+                if (risk.riskReason.length > 0) {
+                    output += `   Evidence:\n`;
+                    for (const reason of risk.riskReason) {
+                        output += `    * ${reason.type}`;
+                        if (reason.txhash) output += ` (TX: ${reason.txhash})`;
+                        if (reason.total_value)
+                            output += ` Value: ${reason.total_value}`;
+                        if (reason.related_addr)
+                            output += ` Related: ${reason.related_addr}`;
+                        output += `\n`;
+                    }
+                }
             }
-        } else {
-            output += `\nNo entity risk data found.\n`;
         }
 
-        // Related Addresses - Updated format
-        if (item.relatedAddresses && item.relatedAddresses.length > 0) {
-            output += `\nRelated Addresses:\n`;
-            for (const raddr of item.relatedAddresses) {
-                output += ` - Address: ${raddr.address}\n`;
-                output += `   Certainty: ${raddr.certainty}\n`;
-                output += `   Reasons: ${raddr.description.join(", ")}\n`;
+        // Entity Risks
+        if (item.entityRisk?.length > 0) {
+            output += `\nEntity Risk Analysis:\n`;
+            for (const risk of item.entityRisk) {
+                output += ` - Address: ${risk.address}\n`;
+                output += `   Certainty: ${risk.certainty}%\n`;
+                output += `   Risk Score: ${risk.riskScore}\n`;
             }
-        } else {
-            output += `\nNo related addresses found.\n`;
         }
 
-        // Related Reasons - Updated format
-        if (item.relatedReasons?.rows.length > 0) {
-            output += `\nRelated Address Connection Types:\n`;
-            output += `Total connections found: ${item.relatedReasons.total}\n`;
+        // Related Addresses
+        if (item.relatedAddresses?.length > 0) {
+            output += `\nRelated Addresses (Top 10 by certainty):\n`;
+            const sortedAddresses = [...item.relatedAddresses]
+                .sort((a, b) => b.certainty - a.certainty)
+                .slice(0, 10);
+
+            for (const addr of sortedAddresses) {
+                output += ` - ${addr.address}\n`;
+                output += `   Certainty: ${addr.certainty}%\n`;
+                if (addr.description?.length > 0) {
+                    output += `   Relationship: ${addr.description.join(", ")}\n`;
+                }
+            }
+        }
+
+        // Related Reasons
+        if (item.relatedReasons?.rows?.length > 0) {
+            output += `\nConnection Details:\n`;
             for (const reason of item.relatedReasons.rows) {
-                output += ` - Type: ${reason.connectionType}\n`;
-                output += `   Proof Transactions: ${reason.proof.length} transactions\n`;
+                output += ` - ${reason.connectionType}\n`;
+                if (reason.proof?.length > 0) {
+                    output += `   Proof: ${reason.proof.join(", ")}\n`;
+                }
             }
         }
 
-        // Cluster Info - Updated format
-        if (item.clusterEntity && item.clusterEntity.length > 0) {
+        // Cluster Info
+        if (item.clusterEntity?.length > 0) {
             output += `\nAddress Clusters:\n`;
             item.clusterEntity.forEach((cluster, index) => {
-                output += ` - Cluster ${index + 1}: ${cluster.join(", ")}\n`;
+                if (cluster.length > 1) {
+                    output += ` - Cluster ${index + 1} (${cluster.length} addresses):\n`;
+                    output += `   ${cluster.join("\n   ")}\n`;
+                }
             });
         }
 
