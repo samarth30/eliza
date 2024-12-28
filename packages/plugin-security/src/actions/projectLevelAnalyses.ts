@@ -1,11 +1,15 @@
 import {
+    composeContext,
     elizaLogger,
+    generateText,
     HandlerCallback,
     IAgentRuntime,
     Memory,
+    ModelClass,
     State,
     type Action,
 } from "@elizaos/core";
+import { messageHandlerTemplate } from "../templates/securityAnalysisTemplate";
 
 /*****************************************************
  * CONSTANTS & INTERFACES
@@ -350,13 +354,36 @@ export const projectAnalysisAction: Action = {
             );
 
             // 2) Generate a textual summary or “report”
-            const report = generateProjectReport(analysisData);
+            const detailedReport = generateProjectReport(analysisData);
 
-            // 3) Return or display it
-            await callback({ text: report });
+            // Initialize or update state
+            if (!_state) {
+                _state = (await runtime.composeState(message)) as State;
+            } else {
+                _state = await runtime.updateRecentMessageState(_state);
+            }
+
+            const context = composeContext({
+                state: {
+                    ..._state,
+                    detailedReport,
+                },
+                template: messageHandlerTemplate,
+            });
+
+            const response = await generateText({
+                runtime: runtime,
+                context: context,
+                modelClass: ModelClass.SMALL,
+            });
+
+            // Return or display the final result
+            await callback({
+                text: response,
+            });
             return {
                 raw: analysisData,
-                formatted: report,
+                formatted: detailedReport,
             };
         } catch (error) {
             elizaLogger.error("Project analysis failed:", error);

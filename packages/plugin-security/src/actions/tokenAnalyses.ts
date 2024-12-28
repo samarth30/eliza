@@ -1,11 +1,15 @@
 import {
+    composeContext,
     elizaLogger,
+    generateText,
     HandlerCallback,
     IAgentRuntime,
     Memory,
+    ModelClass,
     State,
     type Action,
 } from "@elizaos/core";
+import { messageHandlerTemplate } from "../templates/securityAnalysisTemplate";
 
 const BASE_URL = "https://api.0xscope.com/v2";
 
@@ -362,19 +366,42 @@ export const tokenAnalysisAction: Action = {
             );
 
             // 4) Generate a textual "report"
-            const tokenReport = generateTokenFocusedReport(
+            const detailedReport = generateTokenFocusedReport(
                 chain,
                 tokenAddress,
                 analysisResult
             );
 
-            // 5) Provide the report back (or pass it to an LLM, etc.)
-            await callback({ text: tokenReport });
+            // Initialize or update state
+            if (!_state) {
+                _state = (await runtime.composeState(message)) as State;
+            } else {
+                _state = await runtime.updateRecentMessageState(_state);
+            }
+
+            const context = composeContext({
+                state: {
+                    ..._state,
+                    detailedReport,
+                },
+                template: messageHandlerTemplate,
+            });
+
+            const response = await generateText({
+                runtime: runtime,
+                context: context,
+                modelClass: ModelClass.SMALL,
+            });
+
+            // Return or display the final result
+            await callback({
+                text: response,
+            });
 
             // You may also return raw data for your system's own usage
             return {
                 raw: analysisResult,
-                formatted: tokenReport,
+                formatted: detailedReport,
             };
         } catch (error) {
             elizaLogger.error("Token analysis failed:", error);

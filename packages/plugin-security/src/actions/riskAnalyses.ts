@@ -1,11 +1,15 @@
 import {
+    composeContext,
     elizaLogger,
+    generateText,
     HandlerCallback,
     IAgentRuntime,
     Memory,
+    ModelClass,
     State,
     type Action,
 } from "@elizaos/core";
+import { messageHandlerTemplate } from "../templates/securityAnalysisTemplate";
 
 const BASE_URL = "https://api.0xscope.com/v2";
 
@@ -438,13 +442,36 @@ export const riskEntityAnalysisAction: Action = {
             );
 
             // 4) Generate a human-friendly report
-            const report = generateRiskEntityReport(analysisResults);
+            const detailedReport = generateRiskEntityReport(analysisResults);
 
-            // 5) Send back the result
-            await callback({ text: report });
+            // Initialize or update state
+            if (!_state) {
+                _state = (await runtime.composeState(message)) as State;
+            } else {
+                _state = await runtime.updateRecentMessageState(_state);
+            }
+
+            const context = composeContext({
+                state: {
+                    ..._state,
+                    detailedReport,
+                },
+                template: messageHandlerTemplate,
+            });
+
+            const response = await generateText({
+                runtime: runtime,
+                context: context,
+                modelClass: ModelClass.SMALL,
+            });
+
+            // Return or display the final result
+            await callback({
+                text: response,
+            });
             return {
                 raw: analysisResults,
-                formatted: report,
+                formatted: detailedReport,
             };
         } catch (error) {
             elizaLogger.error("Risk & Entity Analysis failed:", error);

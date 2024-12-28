@@ -11,45 +11,9 @@ import {
     State,
     type Action,
 } from "@elizaos/core";
+import { messageHandlerTemplate } from "../templates/securityAnalysisTemplate";
 
 const BASE_URL = "https://api.0xscope.com/v2";
-
-const messageHandlerTemplate =
-    // {{goals}}
-    `# Action Examples
-{{actionExamples}}
-(Action examples are for reference only. Do not use the information from them in your response.)
-
-# report : {{detailedPrompt}}
-
-# Knowledge
-{{knowledge}}
-
-# Task: Generate dialog and actions for the character {{agentName}}.
-About {{agentName}}:
-{{bio}}
-{{lore}}
-
-Examples of {{agentName}}'s dialog and actions:
-{{characterMessageExamples}}
-
-{{providers}}
-
-{{attachments}}
-
-{{actions}}
-
-# Capabilities
-Note that {{agentName}} is capable of reading/seeing/hearing various forms of media, including images, videos, audio, plaintext and PDFs. Recent attachments have been included above under the "Attachments" section.
-
-{{messageDirections}}
-
-{{recentMessages}}
-
-# Task: Generate a post/reply of the above report in the voice, style and perspective of {{agentName}} (@{{twitterUserName}}) while using the thread of tweets as additional context:
-
-let's generate message for normal chat text box with the above report.
-`;
 
 interface AnalysisResult {
     identityData?: any;
@@ -376,13 +340,6 @@ export const addressAnalysisAction: Action = {
             const chainMatch = message.content.text.match(/chain=(\w+)/i);
             const chain = chainMatch ? chainMatch[1].toLowerCase() : "ethereum";
 
-            // Initialize or update state
-            if (!_state) {
-                _state = (await runtime.composeState(message)) as State;
-            } else {
-                _state = await runtime.updateRecentMessageState(_state);
-            }
-
             // 1) Perform the analysis
             const analysisResult = await analyzeAddress(
                 chain,
@@ -391,16 +348,23 @@ export const addressAnalysisAction: Action = {
             );
 
             // 2) Build a comprehensive prompt-like report
-            const detailedPrompt = generateDetailedPrompt(
+            const detailedReport = generateDetailedPrompt(
                 chain,
                 address,
                 analysisResult
             );
 
+            // Initialize or update state
+            if (!_state) {
+                _state = (await runtime.composeState(message)) as State;
+            } else {
+                _state = await runtime.updateRecentMessageState(_state);
+            }
+
             const context = composeContext({
                 state: {
                     ..._state,
-                    detailedPrompt,
+                    detailedReport,
                 },
                 template: messageHandlerTemplate,
             });
@@ -417,7 +381,7 @@ export const addressAnalysisAction: Action = {
             });
             return {
                 raw: analysisResult,
-                formatted: detailedPrompt,
+                formatted: detailedReport,
             };
         } catch (error) {
             elizaLogger.error("Address analysis failed:", error);
