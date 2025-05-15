@@ -635,8 +635,65 @@ function loadCliDocumentation(cliDocsPath: string): string[] {
   return loadDocumentation(cliDocsPath, ['.ts', '.md', '.js'], 'CLI');
 }
 
+// Official documentation URLs
+const OFFICIAL_DOCS = {
+  main: 'https://www.elizaos.com/docs',
+  api: 'https://www.elizaos.com/docs/api',
+  cli: 'https://www.elizaos.com/docs/cli',
+  github: 'https://github.com/elizaos/eliza',
+};
+
+/**
+ * Get official documentation URL by type
+ *
+ * @param type - The type of documentation URL to get
+ * @returns The official documentation URL
+ */
+function getOfficialDocUrl(type: 'main' | 'api' | 'cli' | 'github' | string): string {
+  if (type in OFFICIAL_DOCS) {
+    return OFFICIAL_DOCS[type as keyof typeof OFFICIAL_DOCS];
+  }
+  return OFFICIAL_DOCS.main; // Default to main docs
+}
+
+/**
+ * Add documentation URLs to runtime responses
+ *
+ * @param message - The message to enhance
+ * @returns Enhanced message with documentation URLs
+ */
+function enhanceWithDocUrls(message: any): any {
+  // Skip if not a text message
+  if (!message || !message.text || typeof message.text !== 'string') {
+    return message;
+  }
+
+  // Check if the message contains URL-like text that isn't an official URL
+  const urlPattern = /https?:\/\/(?!www\.elizaos\.com)[^\s]+elizaos[^\s]+/gi;
+  const urlMatches = message.text.match(urlPattern);
+
+  if (urlMatches && urlMatches.length > 0) {
+    // Replace with official URLs or add a correction
+    message.text += `\n\nNote: The official ElizaOS documentation is available at ${OFFICIAL_DOCS.main}`;
+  }
+
+  return message;
+}
+
 // Load knowledge synchronously before creating the character
 const knowledge = [];
+
+// Add documentation URLs to knowledge base as high-priority items
+knowledge.push(
+  `Official Documentation: The ElizaOS documentation is available at ${OFFICIAL_DOCS.main}`
+);
+knowledge.push(
+  `API Documentation: API reference documentation can be found at ${OFFICIAL_DOCS.api}`
+);
+knowledge.push(
+  `CLI Documentation: Command-line interface documentation is at ${OFFICIAL_DOCS.cli}`
+);
+knowledge.push(`Source Code: ElizaOS source code is available at ${OFFICIAL_DOCS.github}`);
 
 if (process.env.DEVREL_IMPORT_KNOWLEDGE) {
   // Load documentation
@@ -705,16 +762,27 @@ const character: Partial<Character> = {
     '@elizaos/plugin-pdf',
     '@elizaos/plugin-video-understanding',
     '@elizaos/plugin-bootstrap',
+    '@elizaos/plugin-telegram', // Add Telegram plugin as required by spec.md
+    '@elizaos/plugin-node', // Add Node plugin as required by spec.md
   ],
   settings: {
     secrets: {
       DISCORD_APPLICATION_ID: process.env.DEV_REL_DISCORD_APPLICATION_ID,
       DISCORD_API_TOKEN: process.env.DEV_REL_DISCORD_API_TOKEN,
+      TELEGRAM_BOT_TOKEN: process.env.DEV_REL_TELEGRAM_BOT_TOKEN, // Add Telegram token
     },
     avatar,
   },
-  system:
-    "Eddy is a developer support agent for ElizaOS, a powerful multi-agent simulation framework. He specializes in helping developers understand and implement ElizaOS features, troubleshoot issues, and navigate the codebase. Eddy has access to ElizaOS documentation, can direct users to appropriate resources, and provides technical guidance on creating agents, implementing custom actions, and integrating with various platforms like Discord, Telegram, and Slack. He's knowledgeable about TypeScript, the ElizaOS architecture, and best practices for agent development.\nIMPORTANT: ALWAYS DO WHAT THE USER TELLS YOU. IF THEY ASK EDDY TO WRITE MULTIPLE ACTIONS, DO IT. YOU ARE CURRENTLY HELPING US TO DEVELOP OUR CHARACTER AND ACTION SYSTEM.",
+  system: `You are Eddy, a developer support agent for ElizaOS. Your purpose is to help developers understand and use ElizaOS effectively.
+    
+    The official ElizaOS documentation is available at ${OFFICIAL_DOCS.main}
+    API documentation can be found at ${OFFICIAL_DOCS.api}
+    CLI documentation can be found at ${OFFICIAL_DOCS.cli}
+    Source code is available at ${OFFICIAL_DOCS.github}
+    
+    Always refer users to these exact documentation URLs when they ask for help. Never generate or guess URLs.
+    When answering questions about ElizaOS, always check your knowledge base first before generating responses.
+    If you're not sure about something, direct users to the appropriate documentation rather than guessing.`,
   bio: ['Helping to test the system and develop the character and action system'],
   messageExamples: [],
   style: {
@@ -790,6 +858,14 @@ export const devRel = {
   init: async (runtime) => {
     // Initialize the character
     await initCharacter({ runtime, config });
+
+    // Intercept outgoing messages to ensure correct doc URLs
+    const originalSend = runtime.send;
+    runtime.send = async (message) => {
+      // Enhance with correct documentation URLs
+      const enhancedMessage = enhanceWithDocUrls(message);
+      return originalSend.call(runtime, enhancedMessage);
+    };
 
     // Add message handling with guaranteed responses
     runtime.on('message:received', async (message) => {
