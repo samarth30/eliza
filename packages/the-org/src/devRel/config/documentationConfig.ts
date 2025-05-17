@@ -8,9 +8,9 @@ const __dirname = path.dirname(__filename);
 
 // Official documentation URLs
 export const OFFICIAL_DOCS = {
-  main: 'https://www.elizaos.com/docs',
-  api: 'https://www.elizaos.com/docs/api',
-  cli: 'https://www.elizaos.com/docs/cli',
+  main: 'https://eliza.how/docs',
+  api: 'https://eliza.how/api',
+  cli: 'https://eliza.how/docs/cli/overview',
   github: 'https://github.com/elizaos/eliza',
 };
 
@@ -40,7 +40,7 @@ export function enhanceWithDocUrls(message: any): any {
   }
 
   // Check if the message contains URL-like text that isn't an official URL
-  const urlPattern = /https?:\/\/(?!www\.elizaos\.com)[^\s]+elizaos[^\s]+/gi;
+  const urlPattern = /https?:\/\/(?!eliza\.how)[^\s]+eliza[^\s]+/gi;
   const urlMatches = message.text.match(urlPattern);
 
   if (urlMatches && urlMatches.length > 0) {

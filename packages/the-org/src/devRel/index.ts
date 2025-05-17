@@ -24,10 +24,10 @@ const knowledge = loadKnowledgeBase();
 const character: Character = {
   name: 'Eddy',
   plugins: [
-    '@elizaos/plugin-anthropic',
+    // '@elizaos/plugin-anthropic',
     '@elizaos/plugin-openai',
     '@elizaos/plugin-discord',
-    '@elizaos/plugin-telegram',
+    // '@elizaos/plugin-telegram',
     '@elizaos/plugin-node',
     '@elizaos/plugin-sql',
     '@elizaos/plugin-pdf',
@@ -35,9 +35,10 @@ const character: Character = {
   ],
   settings: {
     secrets: {
-      DISCORD_APPLICATION_ID: process.env.DEV_SUPPORT_DISCORD_APPLICATION_ID,
-      DISCORD_API_TOKEN: process.env.DEV_SUPPORT_DISCORD_API_TOKEN,
-      TELEGRAM_BOT_TOKEN: process.env.DEV_SUPPORT_TELEGRAM_TOKEN,
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+      DISCORD_APPLICATION_ID: process.env.DEV_REL_DISCORD_APPLICATION_ID,
+      DISCORD_API_TOKEN: process.env.DEV_REL_DISCORD_API_TOKEN,
+      // TELEGRAM_BOT_TOKEN: process.env.DEV_SUPPORT_TELEGRAM_TOKEN,
     },
     avatar,
   },
