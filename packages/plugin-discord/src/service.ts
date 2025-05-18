@@ -27,6 +27,7 @@ import {
   type PartialMessageReaction,
   type PartialUser,
   Partials,
+
   PermissionsBitField,
   type TextChannel,
   type User,
@@ -53,7 +54,7 @@ import { VoiceManager } from './voice';
 export class DiscordService extends Service implements IDiscordService {
   static serviceType: string = DISCORD_SERVICE_NAME;
   capabilityDescription = 'The agent is able to send and receive messages on discord';
-  client: DiscordJsClient | null;
+  client: DiscordJsClient | null = null;
   character: Character;
   messageManager?: MessageManager;
   voiceManager?: VoiceManager;
@@ -67,6 +68,15 @@ export class DiscordService extends Service implements IDiscordService {
    *
    * @param {IAgentRuntime} runtime - The AgentRuntime instance
    */
+  // Maximum number of reconnection attempts
+  private maxReconnectAttempts = 5;
+  // Current reconnection attempt count
+  private reconnectAttempts = 0;
+  // Base delay for exponential backoff (in ms)
+  private reconnectBaseDelay = 5000;
+  // Flag to track if a reconnection is in progress
+  private isReconnecting = false;
+
   constructor(runtime: IAgentRuntime) {
     super(runtime);
 
@@ -81,42 +91,147 @@ export class DiscordService extends Service implements IDiscordService {
     }
 
     try {
-      this.client = new DiscordJsClient({
-        intents: [
-          GatewayIntentBits.Guilds,
-          GatewayIntentBits.GuildMembers,
-          GatewayIntentBits.GuildPresences,
-          GatewayIntentBits.DirectMessages,
-          GatewayIntentBits.GuildVoiceStates,
-          GatewayIntentBits.MessageContent,
-          GatewayIntentBits.GuildMessages,
-          GatewayIntentBits.DirectMessageTyping,
-          GatewayIntentBits.GuildMessageTyping,
-          GatewayIntentBits.GuildMessageReactions,
-        ],
-        partials: [Partials.Channel, Partials.Message, Partials.User, Partials.Reaction],
-      });
-
-      this.runtime = runtime;
-      this.voiceManager = new VoiceManager(this, runtime);
-      this.messageManager = new MessageManager(this);
-
-      this.client.once(Events.ClientReady, this.onReady.bind(this));
-      this.client.login(token).catch((error) => {
-        logger.error(
-          `Failed to login to Discord: ${error instanceof Error ? error.message : String(error)}`
-        );
-        this.client = null;
-      });
-
-      this.setupEventListeners();
-      this.registerSendHandler(); // Register handler during construction
+      this.initializeClient(token);
     } catch (error) {
       logger.error(
         `Error initializing Discord client: ${error instanceof Error ? error.message : String(error)}`
       );
       this.client = null;
     }
+  }
+
+  /**
+   * Initialize the Discord client with proper error handling and reconnection logic
+   * @param token Discord API token
+   * @private
+   */
+  private initializeClient(token: string): void {
+    this.client = new DiscordJsClient({
+      intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildPresences,
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.DirectMessageTyping,
+        GatewayIntentBits.GuildMessageTyping,
+        GatewayIntentBits.GuildMessageReactions,
+      ],
+      partials: [Partials.Channel, Partials.Message, Partials.User, Partials.Reaction],
+      // Set a reasonable timeout value to avoid negative timeout issues
+      rest: {
+        timeout: 60000, // 60 seconds timeout
+      },
+      // Add failure threshold to handle connection issues
+      failIfNotExists: false,
+    });
+
+    // No need to reassign runtime as it's already set in the constructor
+    this.voiceManager = new VoiceManager(this, this.runtime);
+    this.messageManager = new MessageManager(this);
+
+    // Set up event listeners for connection issues
+    this.client.on(Events.Error, this.handleConnectionError.bind(this));
+    this.client.on(Events.Warn, (warning) => {
+      logger.warn(`Discord warning: ${warning}`);
+    });
+    this.client.on(Events.Debug, (info) => {
+      if (info.includes('Timeout') || info.includes('error')) {
+        logger.debug(`Discord debug: ${info}`);
+      }
+    });
+
+    // Set up disconnect handler
+    this.client.on(Events.ShardDisconnect, (closeEvent) => {
+      logger.warn(`Discord disconnected: ${closeEvent.reason} (code: ${closeEvent.code})`);
+      this.attemptReconnect(token);
+    });
+
+    this.client.once(Events.ClientReady, this.onReady.bind(this));
+
+    // Login with error handling
+    this.client.login(token).catch((error) => {
+      logger.error(
+        `Failed to login to Discord: ${error instanceof Error ? error.message : String(error)}`
+      );
+      this.attemptReconnect(token);
+    });
+
+    this.setupEventListeners();
+    this.registerSendHandler(); // Register handler during construction
+  }
+
+  /**
+   * Handle connection errors and attempt reconnection
+   * @param error The error that occurred
+   * @private
+   */
+  private handleConnectionError(error: Error): void {
+    logger.error(`Discord connection error: ${error.message}`);
+
+    // Check if the error is related to timeouts or WebSocket issues
+    if (error.message.includes('Timeout') ||
+      error.message.includes('WebSocket') ||
+      error.message.includes('negative number')) {
+      const token = this.runtime.getSetting('DISCORD_API_TOKEN') as string;
+      this.attemptReconnect(token);
+    }
+  }
+
+  /**
+   * Attempt to reconnect to Discord with exponential backoff
+   * @param token Discord API token
+   * @private
+   */
+  private attemptReconnect(token: string): void {
+    // Prevent multiple reconnection attempts running simultaneously
+    if (this.isReconnecting) {
+      return;
+    }
+
+    this.isReconnecting = true;
+
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      logger.error(`Maximum reconnection attempts (${this.maxReconnectAttempts}) reached. Giving up.`);
+      this.isReconnecting = false;
+      this.client = null;
+      return;
+    }
+
+    // Calculate delay with exponential backoff
+    const delay = this.reconnectBaseDelay * Math.pow(2, this.reconnectAttempts);
+    this.reconnectAttempts++;
+
+    logger.info(`Attempting to reconnect to Discord in ${delay / 1000} seconds (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+
+    // Schedule reconnection
+    const timeout = setTimeout(() => {
+      logger.info('Reconnecting to Discord...');
+
+      // Clean up existing client if needed
+      if (this.client) {
+        try {
+          this.client.destroy();
+        } catch (e) {
+          logger.warn(`Error destroying Discord client: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+
+      // Initialize a new client
+      try {
+        this.initializeClient(token);
+        this.isReconnecting = false;
+      } catch (error) {
+        logger.error(`Failed to reconnect: ${error instanceof Error ? error.message : String(error)}`);
+        this.isReconnecting = false;
+        // Don't set client to null here to allow further reconnection attempts
+      }
+    }, delay);
+
+    // Track timeout for cleanup
+    this.timeouts.push(timeout);
   }
 
   static async start(runtime: IAgentRuntime) {
@@ -632,16 +747,16 @@ export class DiscordService extends Service implements IDiscordService {
                 },
                 discord: member.user.globalName
                   ? {
-                      username: tag,
-                      name: member.displayName || member.user.username,
-                      globalName: member.user.globalName,
-                      userId: member.id,
-                    }
+                    username: tag,
+                    name: member.displayName || member.user.username,
+                    globalName: member.user.globalName,
+                    userId: member.id,
+                  }
                   : {
-                      username: tag,
-                      name: member.displayName || member.user.username,
-                      userId: member.id,
-                    },
+                    username: tag,
+                    name: member.displayName || member.user.username,
+                    userId: member.id,
+                  },
               },
             });
           }
@@ -679,16 +794,16 @@ export class DiscordService extends Service implements IDiscordService {
                     },
                     discord: member.user.globalName
                       ? {
-                          username: tag,
-                          name: member.displayName || member.user.username,
-                          globalName: member.user.globalName,
-                          userId: member.id,
-                        }
+                        username: tag,
+                        name: member.displayName || member.user.username,
+                        globalName: member.user.globalName,
+                        userId: member.id,
+                      }
                       : {
-                          username: tag,
-                          name: member.displayName || member.user.username,
-                          userId: member.id,
-                        },
+                        username: tag,
+                        name: member.displayName || member.user.username,
+                        userId: member.id,
+                      },
                   },
                 });
               }
@@ -729,16 +844,16 @@ export class DiscordService extends Service implements IDiscordService {
                 },
                 discord: member.user.globalName
                   ? {
-                      username: tag,
-                      name: member.displayName || member.user.username,
-                      globalName: member.user.globalName,
-                      userId: member.id,
-                    }
+                    username: tag,
+                    name: member.displayName || member.user.username,
+                    globalName: member.user.globalName,
+                    userId: member.id,
+                  }
                   : {
-                      username: tag,
-                      name: member.displayName || member.user.username,
-                      userId: member.id,
-                    },
+                    username: tag,
+                    name: member.displayName || member.user.username,
+                    userId: member.id,
+                  },
               },
             });
           }
