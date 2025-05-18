@@ -3,6 +3,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { calculateSimilarity, generateEmbedding } from '../embeddings/embeddingService';
 import { getFilesRecursively } from '../utils/fileUtils';
+import { RAGSystem } from './rag';
+
+// Singleton RAG instance
+let ragSystem: RAGSystem | null = null;
+
+/**
+ * Initialize the RAG system if not already initialized
+ */
+async function ensureRAGInitialized(docConfig: DocumentationConfig[]): Promise<RAGSystem> {
+  if (!ragSystem) {
+    ragSystem = new RAGSystem(docConfig);
+    await ragSystem.initialize();
+    await ragSystem.generateEmbeddings();
+  }
+  return ragSystem;
+}
 
 // Types for documentation and knowledge base
 export interface DocumentationConfig {
@@ -482,61 +498,21 @@ export async function findRelevantDocumentation(
   query: string,
   docConfig: DocumentationConfig[]
 ): Promise<string[]> {
-  if (!query || !docConfig?.length) return [];
+  try {
+    const rag = await ensureRAGInitialized(docConfig);
+    const results = await rag.query(query, 5, 0.6); // Get top 5 results with score >= 0.6
 
-  const parsedDocs = await loadAllDocumentation(docConfig);
-  if (!parsedDocs.length) return [];
-
-  // Extract key terms from query
-  const keyTerms = query
-    .toLowerCase()
-    .split(/\W+/)
-    .filter((w) => w.length > 2);
-
-  // Score each section
-  const scoredSections: ScoredDoc[] = [];
-  for (const doc of parsedDocs) {
-    for (const section of doc.sections) {
-      // Skip empty sections
-      if (!section.content.trim()) continue;
-
-      // Calculate exact match score
-      const exactScore = keyTerms.reduce((score, term) => {
-        const regex = new RegExp(term, 'gi');
-        const matches = section.content.match(regex);
-        return score + (matches ? matches.length : 0);
-      }, 0);
-
-      // Calculate semantic score
-      const semanticScore = await calculateSimilarity(query, section.content);
-      // Combine scores with heavy weight on exact matches
-      const finalScore = exactScore * 2 + semanticScore;
-
-      if (finalScore > 0) {
-        scoredSections.push({
-          content: section.content.trim(),
-          filePath: doc.filePath,
-          score: finalScore,
-          metadata: {
-            title: section.title,
-            section: section.title,
-          },
-        });
-      }
-    }
+    // Format results with source attribution
+    return results.map((result) => {
+      const source = result.metadata?.source ? `[Source: ${result.metadata.source}] ` : '';
+      return `${source}${result.content}`;
+    });
+  } catch (error) {
+    logger.error('Error in RAG-based document search:', error);
+    // Fall back to exact keyword matching if RAG fails
+    const keywordResults = await findExactKeywordMatches(query, docConfig);
+    return keywordResults.map((result) => result.content);
   }
-
-  // Sort by score
-  scoredSections.sort((a, b) => b.score - a.score);
-
-  // Re-rank results based on semantic similarity
-  const reRankedResults = await reRankResults(scoredSections.slice(0, 10), query);
-
-  // Format top results with context
-  return reRankedResults.slice(0, 5).map((section) => {
-    const relativePath = section.filePath.split('packages/docs/')[1] || section.filePath;
-    return `Documentation Path: ${relativePath}\nTitle: ${section.metadata?.title || ''}\nSection: ${section.metadata?.section || ''}\n\n${section.content}`;
-  });
 }
 
 /**
@@ -617,8 +593,17 @@ async function isKnowledgeDuplicate(newItem: any, existingItems: any[]): Promise
  * @returns Cosine similarity between the two vectors
  */
 function cosineSimilarity(vector1: number[], vector2: number[]): number {
-  const dotProduct = vector1.reduce((sum, value, index) => sum + value * vector2[index], 0);
+  if (!vector1.length || !vector2.length || vector1.length !== vector2.length) {
+    return 0;
+  }
+
+  const dotProduct = vector1.reduce((sum, value, index) => sum + value * (vector2[index] || 0), 0);
   const magnitude1 = Math.sqrt(vector1.reduce((sum, value) => sum + value ** 2, 0));
   const magnitude2 = Math.sqrt(vector2.reduce((sum, value) => sum + value ** 2, 0));
+
+  if (magnitude1 === 0 || magnitude2 === 0) {
+    return 0;
+  }
+
   return dotProduct / (magnitude1 * magnitude2);
 }
