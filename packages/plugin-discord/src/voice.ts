@@ -282,26 +282,70 @@ export class VoiceManager extends EventEmitter {
    * @param {BaseGuildVoiceChannel} channel - The voice channel to join
    */
   async joinChannel(channel: BaseGuildVoiceChannel) {
-    const oldConnection = this.getVoiceConnection(channel.guildId as string);
-    if (oldConnection) {
-      try {
+    // Instead of fetching the channel (which can cause GuildChannelUnowned errors),
+    // directly validate the channel based on the information we already have
+    try {
+      // Validate basic channel properties without making API calls
+      if (!channel || !channel.guild || !channel.id) {
+        throw new Error('Invalid voice channel provided');
+      }
+
+      // Log the attempt with all available information for debugging
+      logger.info(`Attempting to join voice channel ID: ${channel.id}`);
+      logger.info(`Channel guild ID: ${channel.guild.id}, name: ${channel.guild.name}`);
+      logger.info(`Channel type: ${channel.type}`);
+
+      // Only do basic validation and skip advanced checks that might trigger API calls
+      if (channel.type !== DiscordChannelType.GuildVoice) {
+        throw new Error(`Channel is not a voice channel (type: ${channel.type})`);
+      }
+      
+      // Skip permission checks for now as they might cause issues
+      logger.info(`Voice channel validation successful, proceeding to connection`);
+    } catch (error) {
+      logger.error(`Failed to validate voice channel: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`Cannot join voice channel: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    
+    // Log detailed information for debugging
+    logger.info(`Creating voice connection for channel ${channel.id} in guild ${channel.guild.id}`);
+    
+    // Clean up any existing connection first
+    try {
+      // Use direct voice adapter methods to avoid guild channel manager
+      const existingConnections = getVoiceConnections();
+      const oldConnection = existingConnections.get(channel.guild.id);
+      
+      if (oldConnection) {
+        logger.info(`Found existing connection for guild ${channel.guild.id}, cleaning up...`);
         oldConnection.destroy();
         // Remove all associated streams and monitors
         this.streams.clear();
         this.activeMonitors.clear();
-      } catch (error) {
-        console.error('Error leaving voice channel:', error);
       }
+    } catch (error) {
+      logger.error(`Error cleaning up existing voice connection: ${error instanceof Error ? error.message : String(error)}`);
+      // Continue anyway - don't let cleanup errors prevent the new connection
     }
-
-    const connection = joinVoiceChannel({
-      channelId: channel.id,
-      guildId: channel.guild.id,
-      adapterCreator: channel.guild.voiceAdapterCreator as any,
-      selfDeaf: false,
-      selfMute: false,
-      group: this.client?.user?.id ?? 'default-group',
-    });
+    
+    // Create a direct voice connection without relying on guild.channels.fetch()
+    logger.info('Creating new voice connection with direct parameters');
+    let connection;
+    try {
+      connection = joinVoiceChannel({
+        channelId: channel.id,
+        guildId: channel.guild.id,
+        adapterCreator: channel.guild.voiceAdapterCreator as any,
+        selfDeaf: false,
+        selfMute: false,
+        group: this.client?.user?.id ?? 'default-group',
+      });
+      
+      logger.info('Voice connection created successfully');
+    } catch (error) {
+      logger.error(`Failed to create voice connection: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`Failed to create voice connection: ${error instanceof Error ? error.message : String(error)}`);
+    }
 
     try {
       // Wait for either Ready or Signalling state
@@ -947,22 +991,49 @@ export class VoiceManager extends EventEmitter {
         return;
       }
 
-      const voiceChannel = interaction.guild.channels.cache.find(
-        (channel: VoiceChannel) =>
-          channel.id === channelId && channel.type === DiscordChannelType.GuildVoice
-      );
-
-      if (!voiceChannel) {
-        await interaction.editReply('Voice channel not found!');
+      // Access the channel from the cache instead of fetching (which can cause GuildChannelUnowned errors)
+      let voiceChannel;
+      try {
+        // Use cache.get to avoid fetching the channel - this is safer
+        voiceChannel = guild.channels.cache.get(channelId);
+        
+        if (!voiceChannel) {
+          await interaction.editReply('Voice channel not found in this server!');
+          return;
+        }
+        
+        // Verify it's a voice channel
+        if (voiceChannel.type !== DiscordChannelType.GuildVoice) {
+          await interaction.editReply('The selected channel is not a voice channel!');
+          return;
+        }
+        
+        // Verify the bot has permission to join the channel
+        const me = guild.members.me;
+        if (!me) {
+          await interaction.editReply('Bot is not properly connected to this server.');
+          return;
+        }
+        
+        const permissions = voiceChannel.permissionsFor(me);
+        if (!permissions || !permissions.has('Connect')) {
+          await interaction.editReply('I don\'t have permission to join that voice channel!');
+          return;
+        }
+        
+        logger.info(`Attempting to join voice channel ${voiceChannel.name} (${voiceChannel.id}) in guild ${guild.name} (${guild.id})`);
+      } catch (error) {
+        logger.error(`Error fetching voice channel: ${error instanceof Error ? error.message : String(error)}`);
+        await interaction.editReply('Failed to access the voice channel. It may not exist or belong to this server.');
         return;
       }
 
       await this.joinChannel(voiceChannel as BaseGuildVoiceChannel);
       await interaction.editReply(`Joined voice channel: ${voiceChannel.name}`);
     } catch (error) {
-      console.error('Error joining voice channel:', error);
+      logger.error(`Error joining voice channel: ${error instanceof Error ? error.message : String(error)}`);
       // Use editReply instead of reply for the error case
-      await interaction.editReply('Failed to join the voice channel.').catch(console.error);
+      await interaction.editReply(`Failed to join the voice channel: ${error instanceof Error ? error.message : 'Unknown error'}`).catch(console.error);
     }
   }
 
