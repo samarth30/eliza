@@ -28,7 +28,7 @@ const character: Character = {
     '@elizaos/plugin-discord',
     // '@elizaos/plugin-telegram',
     // '@elizaos/plugin-node',
-    // '@elizaos/plugin-sql', 
+    '@elizaos/plugin-sql',
     '@elizaos/plugin-pdf',
     '@elizaos/plugin-bootstrap',
   ],
