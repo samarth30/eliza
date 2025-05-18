@@ -1,4 +1,3 @@
-import { logger } from '@elizaos/core';
 import type { Character } from '@elizaos/core/src/types';
 import dotenv from 'dotenv';
 import { initCharacter } from '../init';
@@ -10,7 +9,7 @@ import { setupMessageHandling } from './runtime/messageHandler';
 import { loadAvatar, loadKnowledgeBase } from './utils/characterLoader';
 
 // Load environment variables
-dotenv.config({ path: '../../.env' });
+dotenv.config({ path: require('path').resolve(process.cwd(), '.env') });
 
 // Load avatar image
 const avatar = loadAvatar();
@@ -28,8 +27,8 @@ const character: Character = {
     '@elizaos/plugin-openai',
     '@elizaos/plugin-discord',
     // '@elizaos/plugin-telegram',
-    '@elizaos/plugin-node',
-    '@elizaos/plugin-sql',
+    // '@elizaos/plugin-node',
+    // '@elizaos/plugin-sql', 
     '@elizaos/plugin-pdf',
     '@elizaos/plugin-bootstrap',
   ],
