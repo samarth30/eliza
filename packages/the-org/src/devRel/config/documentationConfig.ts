@@ -99,11 +99,9 @@ function improveTextFormatting(text: string): string {
  * @returns Array of default DocumentationConfig objects
  */
 export function getDefaultDocConfig(): DocumentationConfig[] {
-  // Try to find docs in multiple potential locations
-  const docsPath = path.resolve(path.join(__dirname, '../../../../docs/docs'));
-  const apiDocsPath = path.resolve(path.join(__dirname, '../../../../docs/api'));
-  const cliPath = path.resolve(path.join(__dirname, '../../../../packages/cli'));
-  const packagesPath = path.resolve(path.join(__dirname, '../../../..'));
+  // Use __dirname to get a reliable path to the docs directory
+  const docsPath = path.resolve(path.join(__dirname, '../../../packages/docs/docs'));
+  const packagesPath = path.resolve(path.join(__dirname, '../../../packages'));
 
   return [
     {
@@ -112,23 +110,11 @@ export function getDefaultDocConfig(): DocumentationConfig[] {
       name: 'General Documentation',
       description: 'Official ElizaOS documentation',
     },
-    {
-      path: apiDocsPath,
-      type: 'api',
-      name: 'API Documentation',
-      description: 'ElizaOS API documentation',
-    },
-    {
-      path: cliPath,
-      type: 'cli',
-      name: 'CLI Documentation',
-      description: 'ElizaOS CLI documentation',
-    },
-    {
-      path: packagesPath,
-      type: 'typescript',
-      name: 'Source Code',
-      description: 'ElizaOS source code',
-    },
+    // {
+    //   path: packagesPath,
+    //   type: 'typescript',
+    //   name: 'Source Code',
+    //   description: 'ElizaOS source code',
+    // },
   ];
 }

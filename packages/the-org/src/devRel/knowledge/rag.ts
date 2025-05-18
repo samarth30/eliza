@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { logger } from '@elizaos/core';
-import { generateEmbedding, cosineSimilarity } from '../embeddings/embeddingService';
+import { generateEmbeddingsBatch, cosineSimilarity } from '../embeddings/embeddingService';
 import { DocumentationConfig } from './knowledgeManager';
 
 export interface DocumentChunk {
@@ -34,7 +34,19 @@ export class RAGSystem {
     logger.info('Initializing RAG system...');
 
     try {
-      // Load documents from all configured sources
+      // Check if embedding cache exists
+      const cacheExists = await this.checkEmbeddingCacheExists();
+
+      if (cacheExists) {
+        logger.info('Embedding cache exists. Skipping document processing.');
+        // Just mark as initialized without processing documents
+        // We'll load embeddings from cache later in generateEmbeddings()
+        this.isInitialized = true;
+        return;
+      }
+
+      // If no cache exists, load documents from all configured sources
+      logger.info('No embedding cache found. Processing documentation sources...');
       for (const config of this.docConfig) {
         await this.processDocumentationSource(config);
       }
@@ -48,13 +60,48 @@ export class RAGSystem {
   }
 
   /**
+   * Check if embedding cache exists and has files
+   */
+  private async checkEmbeddingCacheExists(): Promise<boolean> {
+    try {
+      // Get the cache directory path from the embedding service
+      // This is a bit of a hack but allows us to check the same cache location
+      const cacheDir = path.join(__dirname, '../.embedding-cache');
+
+      // Check if directory exists and has files
+      try {
+        const files = await fs.readdir(cacheDir);
+        const hasEmbeddings = files.some((file) => file.endsWith('.json'));
+
+        if (hasEmbeddings) {
+          logger.info(`Found existing embedding cache with ${files.length} files`);
+          return true;
+        }
+      } catch (err) {
+        // Directory doesn't exist or can't be read
+        return false;
+      }
+
+      return false;
+    } catch (error) {
+      logger.error('Error checking embedding cache:', error);
+      return false;
+    }
+  }
+
+  /**
    * Process a single documentation source
    */
   private async processDocumentationSource(config: DocumentationConfig): Promise<void> {
     const { path: sourcePath, type, name } = config;
 
     try {
-      logger.debug(`Processing documentation source: ${name} (${type}) at ${sourcePath}`);
+      // Log the absolute path to help with debugging
+      const absolutePath = path.resolve(sourcePath);
+      logger.info(`Processing documentation source: ${name} (${type})
+      - Source path: ${sourcePath}
+      - Absolute path: ${absolutePath}
+      - Current working directory: ${process.cwd()}`);
 
       // Handle different documentation types
       switch (type) {
@@ -338,23 +385,136 @@ export class RAGSystem {
    * Generate embeddings for all document chunks
    */
   async generateEmbeddings(): Promise<void> {
-    logger.info(`Generating embeddings for ${this.chunks.length} chunks...`);
+    // If we skipped document processing (due to existing cache), we need to load chunks from cache
+    if (this.chunks.length === 0) {
+      logger.info('No chunks loaded. Attempting to reconstruct from embedding cache...');
+      await this.loadChunksFromCache();
+    }
 
-    for (let i = 0; i < this.chunks.length; i++) {
-      try {
-        const chunk = this.chunks[i];
-        chunk.embedding = await generateEmbedding(chunk.content);
+    logger.info(`Checking embeddings for ${this.chunks.length} chunks...`);
 
-        // Log progress every 10 chunks
-        if (i > 0 && i % 10 === 0) {
-          logger.debug(`Generated embeddings for ${i}/${this.chunks.length} chunks`);
+    // Skip if no chunks were found or reconstructed
+    if (this.chunks.length === 0) {
+      logger.warn('No chunks available. Cannot generate or load embeddings.');
+      return;
+    }
+
+    // First try to load embeddings from cache for all chunks
+    // This will populate embeddings from both memory and disk cache without generating new ones
+    const chunksWithoutEmbedding = this.chunks.filter((chunk) => !chunk.embedding);
+    if (chunksWithoutEmbedding.length > 0) {
+      logger.info(`Loading cached embeddings for ${chunksWithoutEmbedding.length} chunks...`);
+
+      // Try to load from cache in batches to avoid overwhelming the system
+      const batchSize = 50;
+      for (let i = 0; i < chunksWithoutEmbedding.length; i += batchSize) {
+        const batch = chunksWithoutEmbedding.slice(i, i + batchSize);
+        const contents = batch.map((chunk) => chunk.content);
+
+        try {
+          // This will check both memory and disk cache but won't generate new embeddings yet
+          // It will only load existing embeddings from cache
+          const cachedEmbeddings = await generateEmbeddingsBatch(contents);
+
+          // Update chunks with cached embeddings
+          cachedEmbeddings.forEach((embedding, index) => {
+            batch[index].embedding = embedding;
+          });
+
+          if (i > 0 && i % 100 === 0) {
+            logger.debug(
+              `Loaded cached embeddings for ${i}/${chunksWithoutEmbedding.length} chunks`
+            );
+          }
+        } catch (error) {
+          logger.error(`Error loading cached embeddings for batch ${i}-${i + batchSize}:`, error);
         }
-      } catch (error) {
-        logger.error(`Error generating embedding for chunk ${i}:`, error);
       }
     }
 
-    logger.info('Finished generating embeddings');
+    // Now check which chunks still need embeddings generated
+    const chunksStillNeedingEmbeddings = this.chunks.filter((chunk) => !chunk.embedding);
+
+    if (chunksStillNeedingEmbeddings.length === 0) {
+      logger.info('All embeddings loaded from cache. No new embeddings needed.');
+      return;
+    }
+
+    // Generate embeddings only for chunks that still don't have them
+    logger.info(`Generating new embeddings for ${chunksStillNeedingEmbeddings.length} chunks...`);
+
+    const contents = chunksStillNeedingEmbeddings.map((chunk) => chunk.content);
+    try {
+      const embeddings = await generateEmbeddingsBatch(contents);
+      embeddings.forEach((embedding, index) => {
+        chunksStillNeedingEmbeddings[index].embedding = embedding;
+      });
+      logger.info(
+        `Successfully generated new embeddings for ${chunksStillNeedingEmbeddings.length} chunks.`
+      );
+    } catch (error) {
+      logger.error('Error generating new embeddings in batch:', error);
+      // Optionally, handle individual fallbacks or mark chunks as failed
+    }
+
+    logger.info('Finished loading and generating embeddings');
+  }
+
+  /**
+   * Load chunks from embedding cache files
+   * This is used when we skip document processing but still need the chunks
+   */
+  private async loadChunksFromCache(): Promise<void> {
+    try {
+      const cacheDir = path.join(__dirname, '../.embedding-cache');
+      const files = await fs.readdir(cacheDir);
+      const jsonFiles = files.filter((file) => file.endsWith('.json'));
+
+      logger.info(`Found ${jsonFiles.length} cache files. Reconstructing chunks...`);
+
+      // Process files in batches to avoid memory issues
+      const batchSize = 50;
+      let reconstructedCount = 0;
+
+      for (let i = 0; i < jsonFiles.length; i += batchSize) {
+        const batch = jsonFiles.slice(i, i + batchSize);
+
+        await Promise.all(
+          batch.map(async (file) => {
+            try {
+              const filePath = path.join(cacheDir, file);
+              const data = await fs.readFile(filePath, 'utf8');
+              const parsed = JSON.parse(data);
+
+              if (parsed.text && parsed.embedding) {
+                // Create a new chunk with the cached data
+                // We don't have the original metadata, so we'll use placeholders
+                this.chunks.push({
+                  content: parsed.text,
+                  embedding: parsed.embedding,
+                  metadata: {
+                    source: 'cache',
+                    title: 'Reconstructed from cache',
+                    section: file.replace('.json', ''),
+                  },
+                });
+                reconstructedCount++;
+              }
+            } catch (error) {
+              logger.error(`Error processing cache file ${file}:`, error);
+            }
+          })
+        );
+
+        if (i > 0 && i % 100 === 0) {
+          logger.debug(`Reconstructed ${reconstructedCount} chunks from cache so far...`);
+        }
+      }
+
+      logger.info(`Successfully reconstructed ${reconstructedCount} chunks from cache.`);
+    } catch (error) {
+      logger.error('Error loading chunks from cache:', error);
+    }
   }
 
   /**
@@ -369,10 +529,28 @@ export class RAGSystem {
       await this.initialize();
     }
 
+    logger.info(`RAG query called with minScore=${minScore}, k=${k}`);
+    logger.info(
+      `Current chunks: ${this.chunks.length}, with embeddings: ${this.chunks.filter((c) => c.embedding).length}`
+    );
+
     try {
       // Generate embedding for the query
-      const queryEmbedding = await generateEmbedding(query);
-      return this.queryWithEmbedding(queryEmbedding, k, minScore);
+      const queryEmbeddings = await generateEmbeddingsBatch([query]);
+      if (!queryEmbeddings || queryEmbeddings.length === 0 || !queryEmbeddings[0]) {
+        logger.error('Failed to generate embedding for query.');
+        throw new Error('Failed to generate query embedding.');
+      }
+
+      // Use a lower minScore for testing if the original minScore fails to find matches
+      const results = await this.queryWithEmbedding(queryEmbeddings[0], k, minScore);
+
+      if (results.length === 0 && minScore > 0.3) {
+        logger.info(`No results found with minScore=${minScore}, trying with lower threshold 0.3`);
+        return this.queryWithEmbedding(queryEmbeddings[0], k, 0.3);
+      }
+
+      return results;
     } catch (error) {
       logger.error('Error generating query embedding:', error);
       throw error;
@@ -395,20 +573,38 @@ export class RAGSystem {
       await this.initialize();
     }
 
+    logger.info(`queryWithEmbedding called with minScore=${minScore}, k=${k}`);
+
     try {
       // Calculate similarity scores for all chunks
       const scoredChunks = [];
+      const totalChunks = this.chunks.length;
+      const chunksWithEmbeddings = this.chunks.filter((c) => c.embedding).length;
+
+      logger.info(`Processing ${totalChunks} chunks (${chunksWithEmbeddings} with embeddings)`);
+
+      if (chunksWithEmbeddings === 0) {
+        logger.error('No chunks have embeddings! Check embedding generation process.');
+        // Attempt to fix by generating embeddings now
+        logger.info('Attempting to generate embeddings now...');
+        await this.generateEmbeddings();
+
+        // Check again after attempting to generate
+        const chunksWithEmbeddingsAfterFix = this.chunks.filter((c) => c.embedding).length;
+        logger.info(`After fix attempt: ${chunksWithEmbeddingsAfterFix} chunks have embeddings`);
+      }
 
       // Process chunks in batches to avoid overwhelming the system
-      const batchSize = 10;
+      const batchSize = 100; // Increased batch size for efficiency
       for (let i = 0; i < this.chunks.length; i += batchSize) {
         const batch = this.chunks.slice(i, i + batchSize);
         const batchResults = await Promise.all(
           batch.map(async (chunk) => {
             if (!chunk.embedding) {
+              logger.debug(`Chunk missing embedding: ${chunk.metadata?.source || 'unknown'}`);
               return { ...chunk, score: -1 };
             }
-            // Convert embeddings to strings for the calculateSimilarity function
+            // Calculate cosine similarity
             const score = cosineSimilarity(queryEmbedding, chunk.embedding);
             return { ...chunk, score };
           })
@@ -416,8 +612,18 @@ export class RAGSystem {
         scoredChunks.push(...batchResults);
       }
 
+      // Find top scores for debugging
+      const topScores = scoredChunks.sort((a, b) => b.score - a.score).slice(0, 10);
+      logger.info(`Top similarity scores: ${topScores.map((c) => c.score.toFixed(4)).join(', ')}`);
+
+      if (topScores.length > 0) {
+        logger.info(
+          `Best match (${topScores[0].score.toFixed(4)}): ${topScores[0].metadata?.source || 'unknown'}`
+        );
+      }
+
       // Filter and sort results
-      return scoredChunks
+      const results = scoredChunks
         .filter((chunk) => chunk.score >= minScore)
         .sort((a, b) => b.score - a.score)
         .slice(0, k)
@@ -426,6 +632,9 @@ export class RAGSystem {
           metadata,
           score,
         }));
+
+      logger.info(`Found ${results.length} results with minScore=${minScore}`);
+      return results;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       logger.error('Error querying RAG system with embedding:', errorMessage);
@@ -491,23 +700,40 @@ export async function initializeRAG(docConfig: DocumentationConfig[]): Promise<R
 }
 
 /**
- * Query the RAG system for relevant information
+ * Query the RAG system with a query string and get a formatted response
+ *
+ * @param query - The query string
+ * @param docConfig - Documentation configuration
+ * @param k - Number of results to return (default: 3)
+ * @param minScore - Minimum similarity score threshold (default: 0.6)
+ * @returns Formatted response with relevant information
  */
 export async function queryRAG(
   query: string,
   docConfig: DocumentationConfig[],
-  k: number = 5,
-  minScore: number = 0.7
+  k: number = 3,
+  minScore: number = 0.4 // Lowered threshold based on testing
 ): Promise<string> {
-  const rag = getRAGSystem(docConfig);
-  await rag.initialize();
-  const results = await rag.query(query, k, minScore);
-  return rag.formatResults(results);
+  try {
+    const rag = getRAGSystem(docConfig);
+    await rag.initialize();
+    const results = await rag.query(query, k, minScore);
+
+    if (results.length === 0) {
+      return 'No relevant information found.';
+    }
+
+    return rag.formatResults(results);
+  } catch (error) {
+    logger.error('Error querying RAG system:', error);
+    return 'Error retrieving information. Please try again later.';
+  }
 }
 
 /**
- * Find documents similar to the input text
- * @param text - The input text to find similar documents for
+ * Query for similar documents with their metadata and scores
+ *
+ * @param text - The text to find similar documents for
  * @param docConfig - Documentation configuration
  * @param k - Maximum number of results to return (default: 5)
  * @param minScore - Minimum similarity score (0-1) for results (default: 0.7)
@@ -522,7 +748,10 @@ export async function querySimilarDocuments(
   const rag = getRAGSystem(docConfig);
 
   try {
-    // Use the standard query method which will handle embeddings internally
+    // Initialize and ensure embeddings are generated
+    await rag.initialize();
+    await rag.generateEmbeddings();
+    // Use the standard query method
     return await rag.query(text, k, minScore);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
