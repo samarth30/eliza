@@ -65,9 +65,25 @@ export function loadDocumentation(
       try {
         const relativePath = path.relative(basePath, filePath);
         const content = fs.readFileSync(filePath, 'utf-8');
-        return `${docType} Path: ${relativePath}
 
-${content}`;
+        // Extract metadata from the content
+        let enhancedContent = content;
+        let title = '';
+
+        // Try to extract title from markdown
+        const titleMatch = content.match(/^#\s+(.+?)\n/m);
+        if (titleMatch && titleMatch[1]) {
+          title = titleMatch[1].trim();
+        } else {
+          // If no title found, use the filename without extension
+          title = path.basename(filePath, path.extname(filePath));
+        }
+
+        // Add structured metadata
+        return `${docType} Path: ${relativePath}
+Title: ${title}
+
+${enhancedContent}`;
       } catch (error) {
         logger.warn(`Error reading ${docType.toLowerCase()} file ${filePath}:`, error);
         return `${docType} Path: ${path.relative(basePath, filePath)}
@@ -134,7 +150,31 @@ Error reading file: ${error}`;
  * @returns {string[]} - Array of API documentation strings
  */
 export function loadApiDocumentation(apiDocsPath: string): string[] {
-  return loadDocumentation(apiDocsPath, ['.md', '.mdx', '.json'], 'API Documentation');
+  const docs = loadDocumentation(apiDocsPath, ['.md', '.mdx', '.json'], 'API Documentation');
+
+  // Process API docs to extract more structured information
+  return docs.map((doc) => {
+    // Check if this is a REST API doc
+    if (doc.includes('.api.mdx') || doc.includes('/rest/')) {
+      try {
+        // Extract endpoint information if available
+        const endpointMatch = doc.match(/\bPATH\b[\s\S]*?`([^`]+)`/i);
+        const methodMatch = doc.match(/\bMETHOD\b[\s\S]*?`([^`]+)`/i);
+
+        if (endpointMatch || methodMatch) {
+          const endpoint = endpointMatch ? endpointMatch[1] : 'Unknown endpoint';
+          const method = methodMatch ? methodMatch[1] : 'Unknown method';
+
+          // Add structured API information
+          return `${doc}\n\nAPI Endpoint: ${method} ${endpoint}`;
+        }
+      } catch (error) {
+        logger.warn('Error processing API doc:', error);
+      }
+    }
+
+    return doc;
+  });
 }
 
 /**
@@ -144,5 +184,37 @@ export function loadApiDocumentation(apiDocsPath: string): string[] {
  * @returns {string[]} - Array of CLI documentation strings
  */
 export function loadCliDocumentation(cliDocsPath: string): string[] {
-  return loadDocumentation(path.join(cliDocsPath, 'docs'), ['.md', '.mdx'], 'CLI Documentation');
+  const docs = loadDocumentation(
+    path.join(cliDocsPath, 'docs'),
+    ['.md', '.mdx'],
+    'CLI Documentation'
+  );
+
+  // Process CLI docs to extract more structured information
+  return docs.map((doc) => {
+    try {
+      // Extract command syntax if available
+      const commandMatch = doc.match(/```(?:bash|sh)\s*\n([^\n]+)/i);
+
+      if (commandMatch && commandMatch[1]) {
+        const command = commandMatch[1].trim();
+
+        // Add structured CLI information
+        return `${doc}\n\nCLI Command: ${command}`;
+      }
+
+      // Try to extract command from headers
+      const headerMatch = doc.match(/^##\s+`([^`]+)`/m);
+      if (headerMatch && headerMatch[1]) {
+        const command = headerMatch[1].trim();
+
+        // Add structured CLI information
+        return `${doc}\n\nCLI Command: ${command}`;
+      }
+    } catch (error) {
+      logger.warn('Error processing CLI doc:', error);
+    }
+
+    return doc;
+  });
 }

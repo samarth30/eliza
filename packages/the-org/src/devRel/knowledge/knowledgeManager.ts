@@ -1,7 +1,8 @@
 import { logger } from '@elizaos/core';
 import fs from 'node:fs';
 import path from 'node:path';
-import { calculateSimilarity } from '../embeddings/embeddingService';
+import { calculateSimilarity, generateEmbedding } from '../embeddings/embeddingService';
+import { getFilesRecursively } from '../utils/fileUtils';
 
 // Types for documentation and knowledge base
 export interface DocumentationConfig {
@@ -20,6 +21,24 @@ export interface KnowledgeBaseConfig {
   };
   keywordTriggers?: string[];
   contextWindow?: number;
+}
+
+interface ParsedDoc {
+  filePath: string;
+  sections: Array<{
+    title: string;
+    content: string;
+  }>;
+}
+
+interface ScoredDoc {
+  content: string;
+  filePath: string;
+  score: number;
+  metadata?: {
+    title?: string;
+    section?: string;
+  };
 }
 
 /**
@@ -286,7 +305,281 @@ export async function updateKnowledgeBase(
 }
 
 /**
- * Checks if a knowledge item is a duplicate of an existing item
+ * Load all documentation files
+ *
+ * @param docConfig - Documentation configuration
+ * @returns Array of parsed documentation content
+ */
+export async function loadAllDocumentation(docConfig: DocumentationConfig[]): Promise<ParsedDoc[]> {
+  return loadDocumentation(docConfig);
+}
+
+async function loadDocumentation(docConfig: DocumentationConfig[]): Promise<ParsedDoc[]> {
+  const docs: ParsedDoc[] = [];
+  for (const config of docConfig) {
+    const basePath = path.join(process.cwd(), 'packages/docs', config.type);
+    const files = await getFilesRecursively(basePath, ['.md']);
+
+    for (const file of files) {
+      const content = await fs.promises.readFile(file, 'utf8');
+      const sections = parseMarkdownSections(content);
+      docs.push({
+        filePath: file,
+        sections,
+      });
+    }
+  }
+  return docs;
+}
+
+function parseMarkdownSections(content: string): Array<{ title: string; content: string }> {
+  const sections: Array<{ title: string; content: string }> = [];
+  const lines = content.split('\n');
+  let currentSection = { title: '', content: '' };
+
+  for (const line of lines) {
+    if (line.startsWith('#')) {
+      if (currentSection.content) {
+        sections.push({ ...currentSection });
+      }
+      currentSection = {
+        title: line.replace(/^#+\s*/, ''),
+        content: '',
+      };
+    } else {
+      currentSection.content += line + '\n';
+    }
+  }
+
+  if (currentSection.content) {
+    sections.push(currentSection);
+  }
+
+  return sections;
+}
+
+/**
+ * Perform semantic search using vector embeddings
+ *
+ * @param query - The user's query
+ * @param docs - Array of parsed documentation
+ * @returns Array of semantically relevant documentation sections
+ */
+async function performSemanticSearch(query: string, docs: ParsedDoc[]): Promise<ScoredDoc[]> {
+  const queryEmbedding = await generateEmbedding(query);
+  const scoredDocs: ScoredDoc[] = [];
+
+  for (const doc of docs) {
+    for (const section of doc.sections) {
+      if (!section.content.trim()) continue;
+
+      const sectionEmbedding = await generateEmbedding(section.content);
+      const similarity = cosineSimilarity(queryEmbedding, sectionEmbedding);
+
+      if (similarity > 0.3) {
+        // Only include reasonably similar sections
+        scoredDocs.push({
+          content: section.content.trim(),
+          filePath: doc.filePath,
+          score: similarity,
+          metadata: {
+            title: section.title,
+            section: section.title,
+          },
+        });
+      }
+    }
+  }
+
+  // Sort by similarity score
+  scoredDocs.sort((a, b) => b.score - a.score);
+  return scoredDocs.slice(0, 10);
+}
+
+/**
+ * Find exact keyword matches in special documentation files
+ *
+ * @param query - The user's query
+ * @param docConfig - Documentation configuration
+ * @returns Array of matching documentation content
+ */
+export async function findExactKeywordMatches(
+  query: string,
+  docConfig: DocumentationConfig[]
+): Promise<ScoredDoc[]> {
+  const matches: ScoredDoc[] = [];
+  const keyTerms = query
+    .toLowerCase()
+    .split(/\W+/)
+    .filter((w) => w.length > 3);
+
+  const parsedDocs = await loadAllDocumentation(docConfig);
+
+  for (const doc of parsedDocs) {
+    for (const section of doc.sections) {
+      // Skip empty sections
+      if (!section.content.trim()) continue;
+
+      // Check for exact matches
+      let score = 0;
+      for (const term of keyTerms) {
+        const regex = new RegExp(term, 'gi');
+        const matches = section.content.match(regex);
+        if (matches) {
+          score += matches.length;
+        }
+      }
+
+      if (score > 0) {
+        matches.push({
+          content: section.content.trim(),
+          filePath: doc.filePath,
+          score,
+          metadata: {
+            title: section.title,
+            section: section.title,
+          },
+        });
+      }
+    }
+  }
+
+  // Sort by score
+  matches.sort((a, b) => b.score - a.score);
+  return matches.slice(0, 5);
+}
+
+/**
+ * Re-rank results based on semantic similarity
+ *
+ * @param results - Results to re-rank
+ * @param query - The user's query
+ * @returns Re-ranked results
+ */
+async function reRankResults(results: ScoredDoc[], query: string): Promise<ScoredDoc[]> {
+  const queryEmbedding = await generateEmbedding(query);
+  const reRankedResults: ScoredDoc[] = [];
+
+  for (const result of results) {
+    const resultEmbedding = await generateEmbedding(result.content);
+    const similarity = cosineSimilarity(queryEmbedding, resultEmbedding);
+    reRankedResults.push({ ...result, score: similarity });
+  }
+
+  // Sort by similarity score
+  reRankedResults.sort((a, b) => b.score - a.score);
+  return reRankedResults;
+}
+
+/**
+ * Find relevant documentation based on a user query using improved RAG with vector search
+ *
+ * @param query - The user's query
+ * @param docConfig - Documentation configuration
+ * @returns Array of relevant documentation content
+ */
+export async function findRelevantDocumentation(
+  query: string,
+  docConfig: DocumentationConfig[]
+): Promise<string[]> {
+  if (!query || !docConfig?.length) return [];
+
+  const parsedDocs = await loadAllDocumentation(docConfig);
+  if (!parsedDocs.length) return [];
+
+  // Extract key terms from query
+  const keyTerms = query
+    .toLowerCase()
+    .split(/\W+/)
+    .filter((w) => w.length > 2);
+
+  // Score each section
+  const scoredSections: ScoredDoc[] = [];
+  for (const doc of parsedDocs) {
+    for (const section of doc.sections) {
+      // Skip empty sections
+      if (!section.content.trim()) continue;
+
+      // Calculate exact match score
+      const exactScore = keyTerms.reduce((score, term) => {
+        const regex = new RegExp(term, 'gi');
+        const matches = section.content.match(regex);
+        return score + (matches ? matches.length : 0);
+      }, 0);
+
+      // Calculate semantic score
+      const semanticScore = await calculateSimilarity(query, section.content);
+      // Combine scores with heavy weight on exact matches
+      const finalScore = exactScore * 2 + semanticScore;
+
+      if (finalScore > 0) {
+        scoredSections.push({
+          content: section.content.trim(),
+          filePath: doc.filePath,
+          score: finalScore,
+          metadata: {
+            title: section.title,
+            section: section.title,
+          },
+        });
+      }
+    }
+  }
+
+  // Sort by score
+  scoredSections.sort((a, b) => b.score - a.score);
+
+  // Re-rank results based on semantic similarity
+  const reRankedResults = await reRankResults(scoredSections.slice(0, 10), query);
+
+  // Format top results with context
+  return reRankedResults.slice(0, 5).map((section) => {
+    const relativePath = section.filePath.split('packages/docs/')[1] || section.filePath;
+    return `Documentation Path: ${relativePath}\nTitle: ${section.metadata?.title || ''}\nSection: ${section.metadata?.section || ''}\n\n${section.content}`;
+  });
+}
+
+/**
+ * Chunk a document into smaller pieces
+ *
+ * @param text - Text to split into chunks
+ * @returns Array of text chunks
+ */
+function chunkDocument(text: string): string[] {
+  const chunkSize = 500;
+  const overlap = 100;
+  const chunks: string[] = [];
+
+  // Split by paragraphs first to maintain context
+  const paragraphs = text.split('\n\n');
+
+  let currentChunk = '';
+
+  for (const paragraph of paragraphs) {
+    // If adding this paragraph would exceed chunk size, save current chunk and start new one
+    if (currentChunk.length + paragraph.length > chunkSize) {
+      if (currentChunk.length > 0) {
+        chunks.push(currentChunk);
+        // Keep overlap from previous chunk
+        const words = currentChunk.split(' ');
+        const overlapWords = words.slice(Math.max(0, words.length - overlap / 10));
+        currentChunk = overlapWords.join(' ');
+      }
+    }
+
+    currentChunk += (currentChunk ? '\n\n' : '') + paragraph;
+  }
+
+  // Add the last chunk if not empty
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks;
+}
+
+/**
+ * Check if a knowledge item is a duplicate of existing items
  *
  * @param newItem - The new knowledge item
  * @param existingItems - Existing knowledge items
@@ -314,4 +607,18 @@ async function isKnowledgeDuplicate(newItem: any, existingItems: any[]): Promise
   }
 
   return false;
+}
+
+/**
+ * Calculate cosine similarity between two vectors
+ *
+ * @param vector1 - First vector
+ * @param vector2 - Second vector
+ * @returns Cosine similarity between the two vectors
+ */
+function cosineSimilarity(vector1: number[], vector2: number[]): number {
+  const dotProduct = vector1.reduce((sum, value, index) => sum + value * vector2[index], 0);
+  const magnitude1 = Math.sqrt(vector1.reduce((sum, value) => sum + value ** 2, 0));
+  const magnitude2 = Math.sqrt(vector2.reduce((sum, value) => sum + value ** 2, 0));
+  return dotProduct / (magnitude1 * magnitude2);
 }
