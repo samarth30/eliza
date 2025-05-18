@@ -151,6 +151,16 @@ export async function generateEmbedding(text: string): Promise<number[]> {
  * @returns Promise containing array of embedding vectors
  */
 export async function generateEmbeddingsBatch(texts: string[]): Promise<number[][]> {
+  // Strict input validation
+  if (!Array.isArray(texts) || !texts.every((t) => typeof t === 'string')) {
+    logger.warn('Invalid input format for embedding', { input: texts });
+    // Return fallback embeddings for each invalid input
+    if (Array.isArray(texts)) {
+      return texts.map(() => generateFallbackEmbedding(''));
+    } else {
+      return [generateFallbackEmbedding('')];
+    }
+  }
   // Safety check for empty input
   if (!texts || texts.length === 0) {
     return [];
