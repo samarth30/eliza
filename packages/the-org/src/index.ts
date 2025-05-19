@@ -55,11 +55,11 @@ function hasRequiredEnvVars(agent: ProjectAgent): boolean {
 // Define which agents you want to enable
 const enabledAgents = [
   devRel,
-  communityManager,
-  investmentManager,
-  liaison,
-  projectManager,
-  socialMediaManager,
+  // communityManager,
+  // investmentManager,
+  // liaison,
+  // projectManager,
+  // socialMediaManager,
 ];
 
 const availableAgents = enabledAgents.filter(hasRequiredEnvVars);

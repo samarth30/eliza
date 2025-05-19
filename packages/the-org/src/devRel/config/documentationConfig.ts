@@ -99,22 +99,15 @@ function improveTextFormatting(text: string): string {
  * @returns Array of default DocumentationConfig objects
  */
 export function getDefaultDocConfig(): DocumentationConfig[] {
-  // Use __dirname to get a reliable path to the docs directory
-  const docsPath = path.resolve(path.join(__dirname, '../../../packages/docs/docs'));
-  const packagesPath = path.resolve(path.join(__dirname, '../../../packages'));
+  // Use __dirname to get a reliable path to the assets directory
+  const docsPath = path.resolve(path.join(__dirname, '../assets/'));
 
   return [
     {
       path: docsPath,
       type: 'markdown',
-      name: 'General Documentation',
-      description: 'Official ElizaOS documentation',
+      name: 'Tech Support Documentation',
+      description: 'ElizaOS tech support documentation',
     },
-    // {
-    //   path: packagesPath,
-    //   type: 'typescript',
-    //   name: 'Source Code',
-    //   description: 'ElizaOS source code',
-    // },
   ];
 }
