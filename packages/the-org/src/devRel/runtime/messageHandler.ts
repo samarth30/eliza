@@ -7,7 +7,6 @@ import {
   updateKnowledgeBase,
 } from '../knowledge/knowledgeManager';
 import { manageCacheSize } from '../embeddings/embeddingService';
-import { queryRAG } from '../knowledge/rag';
 
 /**
  * Sets up message handling and response management for the runtime
@@ -59,37 +58,60 @@ export function setupMessageHandling(runtime: any, config: any): void {
           if (!docConfig.length) {
             logger.warn('RAG INTERCEPT: No documentation sources configured');
           } else {
-            // Use the queryRAG function with optimized parameters
-            const ragResponse = await queryRAG(userQuery, docConfig, 5, 0.4);
+            try {
+              // Import querySimilarDocuments to get raw document results
+              const { querySimilarDocuments } = await import('../knowledge/rag');
 
-            // Check if relevant information was found
-            const isRelevantFound = ragResponse && ragResponse !== 'No relevant information found.';
+              // Get raw document results instead of formatted string
+              const results = await querySimilarDocuments(userQuery, docConfig, 5, 0.4);
 
-            if (isRelevantFound) {
-              console.log('RAG INTERCEPT: Found relevant documentation');
-              console.log(ragResponse);
+              // Check if we have at least one relevant document
+              if (results.length > 0) {
+                // Use only the top document (highest score) as context
+                const topDocument = results[0];
+                console.log('RAG INTERCEPT: Using top document as context:');
+                console.log(`Document score: ${topDocument.score.toFixed(4)}`);
+                console.log(`Document source: ${topDocument.metadata.source || 'Unknown'}`);
 
-              // Add RAG context to the prompt for better responses
-              const ragContext = `\n\nRELEVANT DOCUMENTATION:\n${ragResponse}\n\nIMPORTANT: When responding about ElizaOS CLI commands, use EXACTLY the command syntax shown in the documentation above. Do not modify or invent command formats.`;
+                // Create context using only the top document
+                const documentSource = topDocument.metadata.source || 'Unknown';
+                const documentTitle = topDocument.metadata.title || 'Untitled';
+                const documentSection = topDocument.metadata.section
+                  ? ` (${topDocument.metadata.section})`
+                  : '';
 
-              // Insert RAG context into the prompt before generating response
-              const insertPoint =
-                prompt && typeof prompt === 'string'
-                  ? prompt.indexOf('instructions:') + 'instructions:'.length
-                  : -1;
-              let enhancedPrompt = prompt;
-              if (insertPoint > 0) {
-                enhancedPrompt =
-                  prompt.slice(0, insertPoint) + ragContext + prompt.slice(insertPoint);
-              } else if (prompt && typeof prompt === 'string') {
-                enhancedPrompt = prompt + ragContext;
+                const topDocContext = `\n\nRELEVANT DOCUMENTATION:\n\n${topDocument.content}\n\nSource: ${documentSource} - ${documentTitle}${documentSection}\n\nIMPORTANT: When responding, use ONLY the context from the documentation above. If the documentation doesn't contain the answer, acknowledge that.`;
+
+                // Insert RAG context into the prompt before generating response
+                const insertPoint =
+                  prompt && typeof prompt === 'string'
+                    ? prompt.indexOf('instructions:') + 'instructions:'.length
+                    : -1;
+                let enhancedPrompt = prompt;
+                if (insertPoint > 0) {
+                  enhancedPrompt =
+                    prompt.slice(0, insertPoint) + topDocContext + prompt.slice(insertPoint);
+                } else if (prompt && typeof prompt === 'string') {
+                  enhancedPrompt = prompt + topDocContext;
+                } else {
+                  enhancedPrompt = topDocContext;
+                }
+
+                // Ensure options is always an object
+                if (!options || typeof options !== 'object') options = {};
+                options.prompt = enhancedPrompt;
+
+                logger.info('Enhanced prompt with top RAG document', {
+                  documentTitle,
+                  documentSource,
+                  score: topDocument.score.toFixed(4),
+                });
               } else {
-                enhancedPrompt = ragContext;
+                logger.info('RAG INTERCEPT: No relevant documents found for query');
               }
-
-              // Ensure options is always an object
-              if (!options || typeof options !== 'object') options = {};
-              options.prompt = enhancedPrompt;
+            } catch (ragError) {
+              logger.error(`Error querying RAG system: ${ragError}`);
+              // Continue with original prompt if RAG fails
             }
           }
         }
@@ -98,22 +120,10 @@ export function setupMessageHandling(runtime: any, config: any): void {
       // Call original useModel with possibly modified options
       // Defensive: ensure options is always an object
       if (!options || typeof options !== 'object') options = {};
-      try {
-        return originalUseModel.call(runtime, modelType, options);
-      } catch (err) {
-        logger.error('Error in original useModel call:', err);
-        return undefined;
-      }
+      return originalUseModel.call(runtime, modelType, options);
     } catch (error) {
-      logger.error('Error in RAG model intercept:', error);
-      // Defensive: ensure options is always an object
-      if (!options || typeof options !== 'object') options = {};
-      try {
-        return originalUseModel.call(runtime, modelType, options);
-      } catch (err) {
-        logger.error('Error in fallback original useModel call:', err);
-        return undefined;
-      }
+      logger.error(`Error in useModel intercept: ${error}`);
+      return originalUseModel.call(runtime, modelType, options);
     }
   };
 
@@ -162,51 +172,71 @@ export function setupMessageHandling(runtime: any, config: any): void {
           const minScore = 0.4; // Lower threshold for better results
           const k = 5; // Get more results for better coverage
 
-          logger.debug('RAG_HANDLER: Calling queryRAG function with parameters', {
+          logger.debug('RAG_HANDLER: Calling querySimilarDocuments function with parameters', {
             k,
             minScore,
           });
 
-          // Use the queryRAG function with optimized parameters
-          const ragResponse = await queryRAG(searchQuery, docConfig, k, minScore);
+          try {
+            // Import querySimilarDocuments to get raw document results instead of formatted string
+            const { querySimilarDocuments } = await import('../knowledge/rag');
 
-          console.log(ragResponse);
+            // Get document results directly
+            const results = await querySimilarDocuments(searchQuery, docConfig, k, minScore);
 
-          // Log the response for debugging
-          const isRelevantFound = ragResponse !== 'No relevant information found.';
-          logger.info('RAG_HANDLER: RAG query completed', {
-            query: searchQuery,
-            foundRelevantInfo: isRelevantFound,
-            responseLength: ragResponse.length,
-          });
+            console.log(`Retrieved ${results.length} documents from RAG query`);
 
-          // Completely replace the message text with the RAG response
-          // Don't blend RAG results with generated text - use RAG directly
-          const originalText = message.text;
+            // Store original text before we make any changes
+            const originalText = message.text;
 
-          if (isRelevantFound) {
-            // When relevant docs are found, use them directly without modification
-            logger.info(
-              'RAG_HANDLER: Using RAG response directly for accurate CLI commands and info'
-            );
+            // Check if we have at least one relevant document
+            if (results.length > 0) {
+              // Use only the top document (highest score) as context
+              const topDocument = results[0];
+              logger.info('RAG_HANDLER: Using top document as context:', {
+                score: topDocument.score.toFixed(4),
+                source: topDocument.metadata.source || 'Unknown',
+                title: topDocument.metadata.title || 'Untitled',
+              });
 
-            // Construct a response that uses the RAG content directly
-            const prefix = "Here's the relevant information from our documentation:\n\n";
+              // Create context using only the top document
+              const documentSource = topDocument.metadata.source || 'Unknown';
+              const documentTitle = topDocument.metadata.title || 'Untitled';
+              const documentSection = topDocument.metadata.section
+                ? ` (${topDocument.metadata.section})`
+                : '';
 
-            // Force model to use exactly what was found in docs
-            message.text = prefix + ragResponse;
-          } else {
-            // No relevant docs found, so keep original text
-            logger.warn('RAG_HANDLER: No relevant docs found, using original message text');
+              // Construct a response that uses only the top document
+              const prefix = "Here's the most relevant information from our documentation:\n\n";
+
+              // Format the content with only the top document
+              message.text =
+                prefix +
+                topDocument.content +
+                `\n\nSource: ${documentSource} - ${documentTitle}${documentSection}`;
+
+              logger.info('RAG_HANDLER: Enhanced message with top document', {
+                documentTitle,
+                documentSource,
+                score: topDocument.score.toFixed(4),
+              });
+            } else {
+              // No relevant docs found, so keep original text
+              logger.warn('RAG_HANDLER: No relevant documents found for query');
+            }
+
+            // Log the replacement details
+            logger.debug('RAG_HANDLER: Message text replaced', {
+              originalLength: originalText.length,
+              newLength: message.text.length,
+              isDirectRagUsage: results.length > 0,
+              docsFound: results.length,
+              platform: message?.conversation?.platform?.toLowerCase() || 'unknown',
+            });
+          } catch (ragError) {
+            logger.error(`Error querying RAG system: ${ragError}`);
+            // Continue with original message if RAG fails
           }
-
-          // Log the replacement details
-          logger.debug('RAG_HANDLER: Message text replaced', {
-            originalLength: originalText.length,
-            newLength: message.text.length,
-            isDirectRagUsage: isRelevantFound,
-            platform: message?.conversation?.platform?.toLowerCase() || 'unknown',
-          });
         } catch (ragError) {
           logger.error(`Error querying RAG system: ${ragError}`);
           // Continue with original message if RAG fails
@@ -225,7 +255,7 @@ export function setupMessageHandling(runtime: any, config: any): void {
 
   const processedMessages = new Set<string>();
 
-  // Add message handling with guaranteed responses
+  // Add message handling with guaranteed responses and RAG integration
   runtime.on('message:received', async (message: any) => {
     // Monitor received messages and set up response timeout
     if (message && message.id) {
@@ -238,7 +268,68 @@ export function setupMessageHandling(runtime: any, config: any): void {
       // Mark this message as processed
       processedMessages.add(message.id);
 
-      logger.debug(`Received message: ${message.id}`);
+      logger.info(`Processing message: ${message.id}`);
+
+      // Process message with RAG if it contains text
+      if (message.content && message.content.text) {
+        try {
+          // Get the query text from the message
+          const queryText = message.content.text;
+          logger.info(
+            `RAG_HANDLER: Processing user message with RAG: ${queryText.substring(0, 100)}...`
+          );
+
+          // Get documentation configuration
+          const docConfig = config?.settings?.DOCUMENTATION_SOURCES?.value || [];
+
+          if (docConfig.length > 0) {
+            try {
+              // Import querySimilarDocuments to get raw document results
+              const { querySimilarDocuments } = await import('../knowledge/rag');
+
+              // Get document results directly
+              const results = await querySimilarDocuments(queryText, docConfig, 5, 0.4);
+
+              if (results.length > 0) {
+                // Use only the top document as context
+                const topDocument = results[0];
+                logger.info('RAG_HANDLER: Found relevant document', {
+                  score: topDocument.score.toFixed(4),
+                  source: topDocument.metadata.source || 'Unknown',
+                  title: topDocument.metadata.title || 'Untitled',
+                });
+
+                // Attach the RAG context to the message for use in response generation
+                // This is the key change - we attach the RAG results to the message object itself
+                // so it can be used later in the response generation process
+                if (!message.metadata) message.metadata = {};
+
+                // Store the top document in the message metadata
+                message.metadata.ragContext = {
+                  content: topDocument.content,
+                  source: topDocument.metadata.source || 'Unknown',
+                  title: topDocument.metadata.title || 'Untitled',
+                  section: topDocument.metadata.section,
+                  score: topDocument.score,
+                };
+
+                logger.info('RAG_HANDLER: Added RAG context to message', {
+                  messageId: message.id,
+                  documentTitle: topDocument.metadata.title || 'Untitled',
+                });
+              } else {
+                logger.info('RAG_HANDLER: No relevant documents found for query');
+              }
+            } catch (ragError) {
+              logger.error(`Error querying RAG system: ${ragError}`);
+            }
+          } else {
+            logger.warn('RAG_HANDLER: No documentation sources configured');
+          }
+        } catch (error) {
+          logger.error(`Error processing message with RAG: ${error}`);
+        }
+      }
 
       // Set up a timeout to ensure we always respond within 20 seconds
       const responseTimeout = setTimeout(async () => {
