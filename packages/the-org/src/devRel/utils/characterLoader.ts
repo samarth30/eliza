@@ -109,6 +109,21 @@ export function loadKnowledgeBase(): string[] {
   );
   knowledge.push(`Source Code: ElizaOS source code is available at ${OFFICIAL_DOCS.github}`);
 
+  // Load the tech support documentation from assets
+  const techSupportPath = path.resolve(path.join(__dirname, '../assets/'));
+  if (fs.existsSync(techSupportPath)) {
+    console.log('Loading tech support documentation...');
+    try {
+      const content = fs.readFileSync(techSupportPath, 'utf-8');
+      knowledge.push(`Path: assets/21-april-19-may-techsupport.md\n\n${content}`);
+      console.log('Successfully loaded tech support documentation');
+    } catch (error) {
+      console.error('Error loading tech support documentation:', error);
+    }
+  } else {
+    console.warn(`Tech support documentation not found at ${techSupportPath}`);
+  }
+
   // Set environment variable
   process.env.DEVREL_IMPORT_KNOWLEDGE = 'true';
   process.env.ENABLE_SOURCE_CODE_KNOWLEDGE = 'true';
@@ -122,25 +137,26 @@ export function loadKnowledgeBase(): string[] {
     // path.resolve(process.cwd()), // Current working directory
   ];
 
-  // Find first existing docs path
-  let docsPath = null;
-  for (const potentialPath of possibleDocPaths) {
-    console.log(`Checking for docs in: ${potentialPath}`);
-    if (fs.existsSync(potentialPath)) {
-      docsPath = potentialPath;
-      console.log(`Found docs directory at: ${docsPath}`);
-      break;
-    }
-  }
+  // TODO : umcomment this later
+  // // Find first existing docs path
+  // let docsPath = null;
+  // for (const potentialPath of possibleDocPaths) {
+  //   console.log(`Checking for docs in: ${potentialPath}`);
+  //   if (fs.existsSync(potentialPath)) {
+  //     docsPath = potentialPath;
+  //     console.log(`Found docs directory at: ${docsPath}`);
+  //     break;
+  //   }
+  // }
 
-  if (docsPath) {
-    console.log('Loading documentation...');
-    const docKnowledge = loadMarkdownDocs(docsPath);
-    knowledge.push(...docKnowledge);
-    console.log(`Loaded ${docKnowledge.length} documentation files into knowledge base`);
-  } else {
-    console.warn('Documentation directory not found in any expected location');
-  }
+  // if (docsPath) {
+  //   console.log('Loading documentation...');
+  //   const docKnowledge = loadMarkdownDocs(docsPath);
+  //   knowledge.push(...docKnowledge);
+  //   console.log(`Loaded ${docKnowledge.length} documentation files into knowledge base`);
+  // } else {
+  //   console.warn('Documentation directory not found in any expected location');
+  // }
 
   // // Find the packages directory for source code
   // let packagesPath = '';
