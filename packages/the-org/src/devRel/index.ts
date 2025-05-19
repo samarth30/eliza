@@ -14,6 +14,7 @@ const imagePath = path.resolve('./src/devRel/assets/portrait.jpg');
 const pluginFaqPath = path.resolve('./src/devRel/assets/plugin-faq.md');
 const techSupportPath = path.resolve('./src/devRel/assets/technical-support-knowledge.md');
 const pluginDocPath = path.resolve('./src/devRel/assets/conversations-technichal-support.md');
+const aprilMayTechSupportPath = path.resolve('./src/devRel/assets/21-april-19-may-techsupport.md');
 
 const conversationsTechSupportPath = path.resolve(
   './src/devRel/assets/conversations-technichal-support.md'
@@ -54,6 +55,17 @@ if (fs.existsSync(conversationsTechSupportPath)) {
     logger.debug('Loaded conversations technical support from', conversationsTechSupportPath);
   } catch (error) {
     logger.warn('Error reading conversations technical support:', error);
+  }
+}
+
+// Load April-May technical support if it exists
+let aprilMayTechSupport = '';
+if (fs.existsSync(aprilMayTechSupportPath)) {
+  try {
+    aprilMayTechSupport = fs.readFileSync(aprilMayTechSupportPath, 'utf-8');
+    logger.debug('Loaded April-May technical support from', aprilMayTechSupportPath);
+  } catch (error) {
+    logger.warn('Error reading April-May technical support:', error);
   }
 }
 
@@ -280,6 +292,11 @@ if (conversationsTechSupport) {
   knowledge.push(`# ElizaOS Conversations Technical Support\n\n${conversationsTechSupport}`);
 }
 
+// Add April-May technical support if available
+if (aprilMayTechSupport) {
+  knowledge.push(`# ElizaOS April-May Technical Support\n\n${aprilMayTechSupport}`);
+}
+
 if (pluginDoc) {
   knowledge.push(`# ElizaOS Plugin Documents\n\n${pluginDoc}`);
 }
@@ -322,8 +339,9 @@ const character: Partial<Character> = {
   name: 'Eddy',
   plugins: [
     '@elizaos/plugin-sql',
-    // '@elizaos/plugin-anthropic',
-    '@elizaos/plugin-openai',
+    // ...(process.env.ANTHROPIC_API_KEY ? ['@elizaos/plugin-anthropic'] : []),
+    ...(process.env.OPENAI_API_KEY ? ['@elizaos/plugin-openai'] : []),
+    // ...(!process.env.OPENAI_API_KEY ? ['@elizaos/plugin-local-ai'] : []),
     '@elizaos/plugin-discord',
     '@elizaos/plugin-pdf',
     '@elizaos/plugin-video-understanding',

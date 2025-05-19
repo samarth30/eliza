@@ -84,7 +84,10 @@ export const recentMessagesProvider: Provider = {
           : Promise.resolve([]),
       ]);
 
-      const isPostFormat = room?.type === ChannelType.FEED || room?.type === ChannelType.THREAD;
+      // Default to message format if room is not found or type is undefined
+      const isPostFormat = room?.type
+        ? room.type === ChannelType.FEED || room.type === ChannelType.THREAD
+        : false;
 
       // Format recent messages and posts in parallel
       const [formattedRecentMessages, formattedRecentPosts] = await Promise.all([
@@ -135,18 +138,24 @@ export const recentMessagesProvider: Provider = {
       }
 
       const metaData = message.metadata as CustomMetadata;
-      const senderName = metaData?.entityName || 'unknown';
+      const senderName =
+        entitiesData.find((entity: Entity) => entity.id === message.entityId)?.names[0] ||
+        metaData?.entityName ||
+        'Unknown User';
       const receivedMessageContent = message.content.text;
 
-      const receivedMessageHeader = addHeader(
-        '# Received Message',
-        `${senderName}: ${receivedMessageContent}`
-      );
+      const hasReceivedMessage = !!receivedMessageContent?.trim();
 
-      const focusHeader = addHeader(
-        '# ⚡ Focus your response',
-        `You are replying to the above message from **${senderName}**. Keep your answer relevant to that message. Do not repeat earlier replies unless the sender asks again.`
-      );
+      const receivedMessageHeader = hasReceivedMessage
+        ? addHeader('# Received Message', `${senderName}: ${receivedMessageContent}`)
+        : '';
+
+      const focusHeader = hasReceivedMessage
+        ? addHeader(
+            '# Focus your response',
+            `You are replying to the above message from **${senderName}**. Keep your answer relevant to that message. Do not repeat earlier replies unless the sender asks again.`
+          )
+        : '';
 
       // Preload all necessary entities for both types of interactions
       const interactionEntityMap = new Map<UUID, Entity>();
