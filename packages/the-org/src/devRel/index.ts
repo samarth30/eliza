@@ -59,11 +59,33 @@ if (fs.existsSync(conversationsTechSupportPath)) {
 }
 
 // Load April-May technical support if it exists
+const aprilMayTechSupportChunks = []; // Array to store chunks
 let aprilMayTechSupport = '';
 if (fs.existsSync(aprilMayTechSupportPath)) {
   try {
-    aprilMayTechSupport = fs.readFileSync(aprilMayTechSupportPath, 'utf-8');
-    logger.debug('Loaded April-May technical support from', aprilMayTechSupportPath);
+    const fileContent = fs.readFileSync(aprilMayTechSupportPath, 'utf-8');
+
+    // Split the large file into smaller chunks (approximately 1000 lines per chunk)
+    const lines = fileContent.split('\n');
+    const chunkSize = 1000;
+    const numChunks = Math.ceil(lines.length / chunkSize);
+
+    logger.debug(
+      `Loaded April-May technical support from ${aprilMayTechSupportPath} (${lines.length} lines, splitting into ${numChunks} chunks)`
+    );
+
+    // Instead of storing as a single string, we'll keep the chunks to add them separately to knowledge
+    aprilMayTechSupport = 'CHUNKED'; // Marker to indicate we're using chunks instead
+
+    // Store chunks in temporary array
+    for (let i = 0; i < numChunks; i++) {
+      const startLine = i * chunkSize;
+      const endLine = Math.min((i + 1) * chunkSize, lines.length);
+      const chunk = lines.slice(startLine, endLine).join('\n');
+      aprilMayTechSupportChunks.push(
+        `# ElizaOS April-May Technical Support (Part ${i + 1}/${numChunks})\n\n${chunk}`
+      );
+    }
   } catch (error) {
     logger.warn('Error reading April-May technical support:', error);
   }
@@ -293,7 +315,10 @@ if (conversationsTechSupport) {
 }
 
 // Add April-May technical support if available
-if (aprilMayTechSupport) {
+if (aprilMayTechSupport === 'CHUNKED') {
+  // Add all chunks to knowledge
+  knowledge.push(...aprilMayTechSupportChunks);
+} else if (aprilMayTechSupport) {
   knowledge.push(`# ElizaOS April-May Technical Support\n\n${aprilMayTechSupport}`);
 }
 
