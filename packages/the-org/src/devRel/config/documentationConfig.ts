@@ -28,10 +28,10 @@ export function getOfficialDocUrl(type: 'main' | 'api' | 'cli' | 'github' | stri
 }
 
 /**
- * Add documentation URLs to runtime responses
+ * Add documentation URLs to runtime responses and improve formatting
  *
  * @param message - The message to enhance
- * @returns Enhanced message with documentation URLs
+ * @returns Enhanced message with documentation URLs and improved formatting
  */
 export function enhanceWithDocUrls(message: any): any {
   // Skip if not a text message
@@ -48,7 +48,49 @@ export function enhanceWithDocUrls(message: any): any {
     message.text += `\n\nNote: The official ElizaOS documentation is available at ${OFFICIAL_DOCS.main}`;
   }
 
+  // Improve formatting of the message text
+  message.text = improveTextFormatting(message.text);
+
   return message;
+}
+
+/**
+ * Improve text formatting for better readability
+ *
+ * @param text - The text to format
+ * @returns Formatted text with proper spacing and structure
+ */
+function improveTextFormatting(text: string): string {
+  if (!text) return text;
+
+  // Format numbered lists (1. Item) with proper spacing
+  let formattedText = text.replace(/(^\d+\.)\s+(.+)/gm, '$1 $2\n');
+
+  // Format numbered lists (1) Item) with proper spacing
+  formattedText = formattedText.replace(/(^\d+\))\s+(.+)/gm, '$1 $2\n');
+
+  // Format bullet points with proper spacing
+  formattedText = formattedText.replace(/(^[\*\-])\s+(.+)/gm, '$1 $2\n');
+
+  // Ensure code blocks have proper spacing
+  formattedText = formattedText.replace(/```([^`]+)```/g, '\n```$1```\n');
+
+  // Ensure command examples have proper spacing
+  formattedText = formattedText.replace(/(`[^`\n]+`)/g, '$1\n');
+
+  // Ensure steps are properly formatted
+  formattedText = formattedText.replace(/(Step \d+:)\s+([^\n]+)/gi, '$1 $2\n');
+
+  // Ensure headers have proper spacing
+  formattedText = formattedText.replace(/(#+\s+.+)\n([^\n])/g, '$1\n\n$2');
+
+  // Ensure paragraphs have proper spacing
+  formattedText = formattedText.replace(/([^\n])\n([^\n])/g, '$1\n\n$2');
+
+  // Fix any excessive newlines (more than 2)
+  formattedText = formattedText.replace(/\n{3,}/g, '\n\n');
+
+  return formattedText;
 }
 
 /**
@@ -57,11 +99,9 @@ export function enhanceWithDocUrls(message: any): any {
  * @returns Array of default DocumentationConfig objects
  */
 export function getDefaultDocConfig(): DocumentationConfig[] {
-  // Try to find docs in multiple potential locations
-  const docsPath = path.resolve(path.join(__dirname, '../../../../docs/docs'));
-  const apiDocsPath = path.resolve(path.join(__dirname, '../../../../docs/api'));
-  const cliPath = path.resolve(path.join(__dirname, '../../../../packages/cli'));
-  const packagesPath = path.resolve(path.join(__dirname, '../../../..'));
+  // Use __dirname to get a reliable path to the docs directory
+  const docsPath = path.resolve(path.join(__dirname, '../../../packages/docs/docs'));
+  const packagesPath = path.resolve(path.join(__dirname, '../../../packages'));
 
   return [
     {
@@ -70,23 +110,11 @@ export function getDefaultDocConfig(): DocumentationConfig[] {
       name: 'General Documentation',
       description: 'Official ElizaOS documentation',
     },
-    {
-      path: apiDocsPath,
-      type: 'api',
-      name: 'API Documentation',
-      description: 'ElizaOS API documentation',
-    },
-    {
-      path: cliPath,
-      type: 'cli',
-      name: 'CLI Documentation',
-      description: 'ElizaOS CLI documentation',
-    },
-    {
-      path: packagesPath,
-      type: 'typescript',
-      name: 'Source Code',
-      description: 'ElizaOS source code',
-    },
+    // {
+    //   path: packagesPath,
+    //   type: 'typescript',
+    //   name: 'Source Code',
+    //   description: 'ElizaOS source code',
+    // },
   ];
 }

@@ -1,11 +1,13 @@
 import { logger } from '@elizaos/core';
-import { enhanceWithDocUrls } from '../config/documentationConfig';
+
 import {
+  DocumentationConfig,
   KnowledgeBaseConfig,
   extractKnowledge,
   updateKnowledgeBase,
 } from '../knowledge/knowledgeManager';
 import { manageCacheSize } from '../embeddings/embeddingService';
+import { queryRAG } from '../knowledge/rag';
 
 /**
  * Sets up message handling and response management for the runtime
@@ -19,18 +21,223 @@ export function setupMessageHandling(runtime: any, config: any): void {
     (runtime as any).timeouts = new Map();
   }
 
-  // Intercept outgoing messages to ensure correct doc URLs
+  // Intercept outgoing messages to enhance with RAG-based documentation
+  logger.info('RAG_SYSTEM: Setting up message handler with RAG query by default');
+  console.log('===== CRITICAL: MessageHandler Initialization =====');
+  console.log('RAG_SYSTEM: setupMessageHandling called - overriding message generation process');
+
+  // Hook into the useModel method to intercept prompt/response
+  const originalUseModel = runtime.useModel;
+  runtime.useModel = async (modelType: any, options: any) => {
+    // Defensive: ensure options is always a non-null object before any access
+    if (!options || typeof options !== 'object') options = {};
+    try {
+      const prompt = options.prompt;
+
+      // Only intercept message generation prompts
+      if (prompt && prompt.includes('recent messages:')) {
+        console.log('===== RAG MODEL INTERCEPT: MESSAGE DETECTED =====');
+
+        // Extract the user's query from the prompt
+        const lines = prompt.split('\n');
+        let userQuery = '';
+
+        // Find the last user message in the prompt
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const line = lines[i];
+          if (line.includes('user:')) {
+            userQuery = line.split('user:')[1].trim();
+            break;
+          }
+        }
+
+        if (userQuery) {
+          console.log(`RAG INTERCEPT: Found user query: ${userQuery}`);
+
+          // Safely get documentation configuration
+          const docConfig = config?.settings?.DOCUMENTATION_SOURCES?.value || [];
+          if (!docConfig.length) {
+            logger.warn('RAG INTERCEPT: No documentation sources configured');
+          } else {
+            // Use the queryRAG function with optimized parameters
+            const ragResponse = await queryRAG(userQuery, docConfig, 5, 0.4);
+
+            // Check if relevant information was found
+            const isRelevantFound = ragResponse && ragResponse !== 'No relevant information found.';
+
+            if (isRelevantFound) {
+              console.log('RAG INTERCEPT: Found relevant documentation');
+              console.log(ragResponse);
+
+              // Add RAG context to the prompt for better responses
+              const ragContext = `\n\nRELEVANT DOCUMENTATION:\n${ragResponse}\n\nIMPORTANT: When responding about ElizaOS CLI commands, use EXACTLY the command syntax shown in the documentation above. Do not modify or invent command formats.`;
+
+              // Insert RAG context into the prompt before generating response
+              const insertPoint =
+                prompt && typeof prompt === 'string'
+                  ? prompt.indexOf('instructions:') + 'instructions:'.length
+                  : -1;
+              let enhancedPrompt = prompt;
+              if (insertPoint > 0) {
+                enhancedPrompt =
+                  prompt.slice(0, insertPoint) + ragContext + prompt.slice(insertPoint);
+              } else if (prompt && typeof prompt === 'string') {
+                enhancedPrompt = prompt + ragContext;
+              } else {
+                enhancedPrompt = ragContext;
+              }
+
+              // Ensure options is always an object
+              if (!options || typeof options !== 'object') options = {};
+              options.prompt = enhancedPrompt;
+            }
+          }
+        }
+      }
+
+      // Call original useModel with possibly modified options
+      // Defensive: ensure options is always an object
+      if (!options || typeof options !== 'object') options = {};
+      try {
+        return originalUseModel.call(runtime, modelType, options);
+      } catch (err) {
+        logger.error('Error in original useModel call:', err);
+        return undefined;
+      }
+    } catch (error) {
+      logger.error('Error in RAG model intercept:', error);
+      // Defensive: ensure options is always an object
+      if (!options || typeof options !== 'object') options = {};
+      try {
+        return originalUseModel.call(runtime, modelType, options);
+      } catch (err) {
+        logger.error('Error in fallback original useModel call:', err);
+        return undefined;
+      }
+    }
+  };
+
   const originalSend = runtime.send;
   runtime.send = async (message: any) => {
-    // Enhance with correct documentation URLs
-    const enhancedMessage = enhanceWithDocUrls(message);
-    return originalSend.call(runtime, enhancedMessage);
+    // Log every outgoing message to verify our handler is executed
+    logger.info('RAG_SYSTEM: Message handler intercepted outgoing message', {
+      messageId: message?.id || 'unknown',
+      channel: message?.conversation?.channel || 'unknown',
+      platform: message?.conversation?.platform || 'unknown',
+    });
+
+    if (message && message.text && typeof message.text === 'string') {
+      try {
+        // Get the original query from the conversation
+        let query = '';
+        if (message.conversation?.id) {
+          const conversation = await runtime.getConversation(message.conversation.id);
+          if (conversation && conversation.messages && conversation.messages.length > 0) {
+            // Find the last user message
+            for (let i = conversation.messages.length - 1; i >= 0; i--) {
+              const msg = conversation.messages[i];
+              if (msg.sender?.role === 'user') {
+                query = msg.text;
+                break;
+              }
+            }
+          }
+        }
+
+        // Always use RAG query by default for all messages
+        try {
+          console.log('RAG_HANDLER: Starting RAG query', { query });
+          // Get documentation configuration
+          const docConfig: DocumentationConfig[] = config.settings.DOCUMENTATION_SOURCES.value;
+          logger.debug('RAG_HANDLER: Documentation config loaded', {
+            sourceCount: docConfig.length,
+          });
+
+          // Use query if available, otherwise use the message text itself
+          const searchQuery = query || message.text;
+          logger.info('RAG_HANDLER: Starting RAG query', { query: searchQuery });
+
+          // IMPROVED: Use a lower threshold based on test-rag.ts results
+          // This helps ensure better document retrieval as seen in the test results
+          const minScore = 0.4; // Lower threshold for better results
+          const k = 5; // Get more results for better coverage
+
+          logger.debug('RAG_HANDLER: Calling queryRAG function with parameters', {
+            k,
+            minScore,
+          });
+
+          // Use the queryRAG function with optimized parameters
+          const ragResponse = await queryRAG(searchQuery, docConfig, k, minScore);
+
+          console.log(ragResponse);
+
+          // Log the response for debugging
+          const isRelevantFound = ragResponse !== 'No relevant information found.';
+          logger.info('RAG_HANDLER: RAG query completed', {
+            query: searchQuery,
+            foundRelevantInfo: isRelevantFound,
+            responseLength: ragResponse.length,
+          });
+
+          // Completely replace the message text with the RAG response
+          // Don't blend RAG results with generated text - use RAG directly
+          const originalText = message.text;
+
+          if (isRelevantFound) {
+            // When relevant docs are found, use them directly without modification
+            logger.info(
+              'RAG_HANDLER: Using RAG response directly for accurate CLI commands and info'
+            );
+
+            // Construct a response that uses the RAG content directly
+            const prefix = "Here's the relevant information from our documentation:\n\n";
+
+            // Force model to use exactly what was found in docs
+            message.text = prefix + ragResponse;
+          } else {
+            // No relevant docs found, so keep original text
+            logger.warn('RAG_HANDLER: No relevant docs found, using original message text');
+          }
+
+          // Log the replacement details
+          logger.debug('RAG_HANDLER: Message text replaced', {
+            originalLength: originalText.length,
+            newLength: message.text.length,
+            isDirectRagUsage: isRelevantFound,
+            platform: message?.conversation?.platform?.toLowerCase() || 'unknown',
+          });
+        } catch (ragError) {
+          logger.error(`Error querying RAG system: ${ragError}`);
+          // Continue with original message if RAG fails
+        }
+      } catch (error) {
+        logger.error('Error enhancing response with documentation:', error);
+      }
+
+      return originalSend.call(runtime, message);
+    }
+
+    return originalSend.call(runtime, message);
   };
+
+  // We've already set up runtime.ragSystem in the initialization
+
+  const processedMessages = new Set<string>();
 
   // Add message handling with guaranteed responses
   runtime.on('message:received', async (message: any) => {
     // Monitor received messages and set up response timeout
     if (message && message.id) {
+      // Check if we've already processed this message
+      if (processedMessages.has(message.id)) {
+        logger.debug(`Skipping already processed message: ${message.id}`);
+        return;
+      }
+
+      // Mark this message as processed
+      processedMessages.add(message.id);
+
       logger.debug(`Received message: ${message.id}`);
 
       // Set up a timeout to ensure we always respond within 20 seconds
@@ -66,6 +273,28 @@ export function setupMessageHandling(runtime: any, config: any): void {
 
     // Handle knowledge extraction if enabled
     handleKnowledgeExtraction(runtime, message, config);
+  });
+
+  // Clean up processed messages periodically to prevent memory leaks
+  const cleanupInterval = setInterval(
+    () => {
+      // Keep the set size manageable by removing older entries when it gets too large
+      if (processedMessages.size > 1000) {
+        logger.debug(`Cleaning up processed messages cache (size: ${processedMessages.size})`);
+        // Convert to array, remove oldest entries, convert back to set
+        const messagesArray = Array.from(processedMessages);
+        const newMessages = messagesArray.slice(messagesArray.length / 2);
+        processedMessages.clear();
+        newMessages.forEach((id) => processedMessages.add(id));
+        logger.debug(`Processed messages cache cleaned (new size: ${processedMessages.size})`);
+      }
+    },
+    1000 * 60 * 60
+  ); // Every hour
+
+  // Add cleanup for the interval
+  runtime.on('cleanup', () => {
+    clearInterval(cleanupInterval);
   });
 
   // Handle when a message is sent successfully
@@ -164,6 +393,9 @@ function setupKnowledgeManagement(runtime: any, config: any): void {
     });
   }
 }
+
+// Removed the generateDetailedResponse function as it's no longer needed
+// RAG query is now used by default for all responses
 
 /**
  * Handle real-time knowledge extraction from messages
