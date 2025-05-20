@@ -164,7 +164,6 @@ async function determineProjectType(): Promise<{ isProject: boolean; isPlugin: b
  */
 async function watchDirectory(dir: string, onChange: () => void): Promise<void> {
   try {
-
     // Get the absolute path of the directory
     const absoluteDir = path.resolve(dir);
     console.info(`Setting up file watching for directory: ${absoluteDir}`);

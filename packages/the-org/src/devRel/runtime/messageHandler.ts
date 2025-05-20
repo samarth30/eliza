@@ -7,6 +7,7 @@ import {
   updateKnowledgeBase,
 } from '../knowledge/knowledgeManager';
 import { manageCacheSize } from '../embeddings/embeddingService';
+import { analyzeAndEnhanceResponse, KnowledgeContext } from './ragUtils';
 
 /**
  * Sets up message handling and response management for the runtime
@@ -73,31 +74,56 @@ export function setupMessageHandling(runtime: any, config: any): void {
                 console.log(`Document score: ${topDocument.score.toFixed(4)}`);
                 console.log(`Document source: ${topDocument.metadata.source || 'Unknown'}`);
 
-                // Create context using only the top document
+                // Enhance the context formatting for better integration with the LLM
                 const documentSource = topDocument.metadata.source || 'Unknown';
                 const documentTitle = topDocument.metadata.title || 'Untitled';
                 const documentSection = topDocument.metadata.section
                   ? ` (${topDocument.metadata.section})`
                   : '';
 
-                const topDocContext = `\n\nRELEVANT DOCUMENTATION:\n\n${topDocument.content}\n\nSource: ${documentSource} - ${documentTitle}${documentSection}\n\nIMPORTANT: When responding, use ONLY the context from the documentation above. If the documentation doesn't contain the answer, acknowledge that.`;
+                // Format knowledge in a more structured way for the LLM to better leverage it
+                const topDocContext = `
 
-                // Insert RAG context into the prompt before generating response
+<knowledge>
+<content>${topDocument.content}</content>
+<source>${documentSource} - ${documentTitle}${documentSection}</source>
+<relevance>${topDocument.score.toFixed(4)}</relevance>
+</knowledge>
+
+<instructions>
+Use the knowledge provided above to answer the question accurately.
+If the knowledge doesn't contain the answer, acknowledge that you don't have that information.
+When referencing information from the documentation, include the source.
+</instructions>`;
+
+                // Insert RAG context into the prompt at a strategic location
                 const insertPoint =
                   prompt && typeof prompt === 'string'
                     ? prompt.indexOf('instructions:') + 'instructions:'.length
                     : -1;
                 let enhancedPrompt = prompt;
-                if (insertPoint > 0) {
+                if (insertPoint !== -1) {
                   enhancedPrompt =
                     prompt.slice(0, insertPoint) + topDocContext + prompt.slice(insertPoint);
-                } else if (prompt && typeof prompt === 'string') {
-                  enhancedPrompt = prompt + topDocContext;
-                } else {
-                  enhancedPrompt = topDocContext;
-                }
+                  // Use model with RAG-enhanced prompt
+                  console.log('RAG INTERCEPT: Using enhanced prompt with documentation context');
 
-                // Ensure options is always an object
+                  // Call original model with enhanced prompt
+                  options.prompt = enhancedPrompt;
+
+                  // Store the original document for post-processing
+                  const knowledgeContext = {
+                    document: topDocument,
+                    query: userQuery,
+                  };
+
+                  // Get the model response
+                  const response = await originalUseModel(modelType, options);
+
+                  // Analyze if the response effectively used the provided knowledge
+                  const enhancedResponse = analyzeAndEnhanceResponse(response, knowledgeContext);
+                  return enhancedResponse;
+                }
                 if (!options || typeof options !== 'object') options = {};
                 options.prompt = enhancedPrompt;
 

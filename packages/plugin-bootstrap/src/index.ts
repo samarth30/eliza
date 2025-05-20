@@ -1125,7 +1125,9 @@ export const bootstrapPlugin: Plugin = {
   providers: [
     providers.evaluatorsProvider,
     providers.anxietyProvider,
-    providers.knowledgeProvider,
+    // Use the enhanced knowledge provider instead of the standard one
+    // providers.knowledgeProvider,
+    providers.enhancedKnowledgeProvider, // Enhanced RAG with Gemini support
     providers.timeProvider,
     providers.entitiesProvider,
     providers.relationshipsProvider,

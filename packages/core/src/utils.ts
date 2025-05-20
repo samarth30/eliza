@@ -6,7 +6,15 @@ import pkg from 'stream-browserify';
 import { names, uniqueNamesGenerator } from 'unique-names-generator';
 import { z } from 'zod';
 
-import type { Content, Entity, IAgentRuntime, Memory, State, TemplateType } from './types';
+import type {
+  Content,
+  Entity,
+  IAgentRuntime,
+  KnowledgeItem,
+  Memory,
+  State,
+  TemplateType,
+} from './types';
 import { ModelType, UUID } from './types';
 import logger from './logger';
 
@@ -47,6 +55,9 @@ function getWavHeader(
 
 /**
  * Prepends a WAV header to a readable stream of audio data.
+ *
+ * This function takes a readable stream containing the audio data and prepends a WAV header to it.
+ * The WAV header is generated based on the provided audio parameters.
  *
  * @param {Readable} readable - The readable stream containing the audio data.
  * @param {number} audioLength - The length of the audio data in seconds.
@@ -401,334 +412,957 @@ const jsonBlockPattern = /```json\n([\s\S]*?)\n```/;
  * It looks for an XML block (e.g., <response>...</response>) and extracts
  * text content from direct child elements (e.g., <key>value</key>).
  *
- * Note: This uses regex and is suitable for simple, predictable XML structures.
- * For complex XML, a proper parsing library is recommended.
+ * Extracted values are strings, but arrays can be parsed from comma-delimited text.
+ * This function also handles knowledge tags and sources for improved RAG integration.
  *
  * @param text - The input text containing the XML structure.
  * @returns An object with key-value pairs extracted from the XML, or null if parsing fails.
  */
-export function parseKeyValueXml(text: string): Record<string, any> | null {
+function parseKeyValueXml(text: string): Record<string, any> | null {
   if (!text) return null;
 
-  // Find the main XML block (e.g., <response>...</response>)
-  const xmlBlockMatch = text.match(/<(\w+)>([\s\S]*?)<\/\1>/);
-  if (!xmlBlockMatch) {
-    logger.warn('Could not find XML block in text');
-    return null;
-  }
+  try {
+    const result: Record<string, any> = {};
 
-  const xmlContent = xmlBlockMatch[2];
-  const result: Record<string, any> = {};
+    // Try to find a top-level XML tag first like <response>...</response>
+    const topLevelRegex = /<([a-zA-Z0-9_]+)>([\s\S]*?)<\/\1>/;
+    const topLevelMatch = text.match(topLevelRegex);
 
-  // Regex to find <key>value</key> patterns
-  const tagPattern = /<([\w-]+)>([\s\S]*?)<\/([\w-]+)>/g;
-  let match;
+    // If found, extract the content inside that tag, otherwise use the whole text
+    const contentToSearch = topLevelMatch ? topLevelMatch[2] : text;
 
-  while ((match = tagPattern.exec(xmlContent)) !== null) {
-    // Ensure opening and closing tags match
-    if (match[1] === match[3]) {
+    // Preserve special tags for RAG improvements
+    const specialTags = ['sources', 'knowledge', 'citations'];
+    specialTags.forEach((tag) => {
+      const tagRegex = new RegExp(`<${tag}>([\s\S]*?)<\/${tag}>`);
+      const match = text.match(tagRegex);
+      if (match && match[1]) {
+        result[tag] = match[1];
+      }
+    });
+
+    // Process all standard tags
+    const standardTagRegex = /<([a-zA-Z0-9_]+)>([\s\S]*?)<\/\1>/g;
+    let match;
+    while ((match = standardTagRegex.exec(contentToSearch)) !== null) {
       const key = match[1];
-      // Basic unescaping for common XML entities (add more as needed)
-      const value = match[2]
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&amp;/g, '&')
-        .replace(/&quot;/g, '"')
-        .replace(/&apos;/g, "'")
-        .trim();
+      const value = match[2];
 
-      // Handle potential comma-separated lists for specific keys
-      if (key === 'actions' || key === 'providers' || key === 'evaluators') {
-        result[key] = value ? value.split(',').map((s) => s.trim()) : [];
+      // Skip if key or value are empty, or if it's a special tag we already processed
+      if (!key || value === undefined || specialTags.includes(key)) continue;
+
+      // Special handling for arrays (comma-delimited values)
+      if (
+        key === 'actions' ||
+        key === 'providers' ||
+        (key.endsWith('s') && !specialTags.includes(key))
+      ) {
+        // Allow for empty array values
+        if (!value.trim()) {
+          result[key] = [];
+        } else {
+          // Split by comma and handle potential quotes around values
+          const valueArray = value
+            .split(',')
+            .map((item) => item.trim())
+            .filter((item) => item.length > 0);
+          result[key] = valueArray;
+        }
       } else if (key === 'simple') {
-        result[key] = value.toLowerCase() === 'true';
+        // Convert 'true'/'false' strings to boolean values
+        result[key] = value.trim().toLowerCase() === 'true';
       } else {
+        // Just use the string value for other keys
         result[key] = value;
       }
-    } else {
-      logger.warn(`Mismatched XML tags found: <${match[1]}> and </${match[3]}>`);
-      // Potentially skip this mismatched pair or return null depending on strictness needed
     }
-  }
 
-  // Return null if no key-value pairs were found
-  if (Object.keys(result).length === 0) {
-    logger.warn('No key-value pairs extracted from XML content');
+    // Add debug field to indicate whether knowledge was used
+    if (result.text && (result.sources || result.knowledge || result.citations)) {
+      result._usedKnowledge = true;
+
+      // Log detailed information about knowledge usage
+      logger.debug('XML parsing detected knowledge usage:', {
+        hasSourcesTag: !!result.sources,
+        hasKnowledgeTag: !!result.knowledge,
+        hasCitationsTag: !!result.citations,
+        responseLength: result.text?.length || 0,
+      });
+      if (Object.keys(result).length === 0) {
+        logger.warn('No key-value pairs extracted from XML content');
+        return null;
+      }
+
+      return result;
+    }
+
+    /**
+     * Parses a JSON object from a given text. The function looks for a JSON block wrapped in triple backticks
+     * with `json` language identifier, and if not found, it searches for an object pattern within the text.
+     * It then attempts to parse the JSON string into a JavaScript object. If parsing is successful and the result
+     * is an object (but not an array), it returns the object; otherwise, it tries to parse an array if the result
+     * is an array, or returns null if parsing is unsuccessful or the result is neither an object nor an array.
+     *
+     * @param text - The input text from which to extract and parse the JSON object.
+     * @returns An object parsed from the JSON string if successful; otherwise, null or the result of parsing an array.
+     */
+    function parseJSONObjectFromText(text: string): Record<string, any> | null {
+      let jsonData = null;
+      const jsonBlockMatch = text.match(jsonBlockPattern);
+
+      try {
+        if (jsonBlockMatch) {
+          // Parse the JSON from inside the code block
+          jsonData = JSON.parse(normalizeJsonString(jsonBlockMatch[1].trim()));
+        } else {
+          // Try to parse the text directly if it's not in a code block
+          jsonData = JSON.parse(normalizeJsonString(text.trim()));
+        }
+      } catch (_e) {
+        // logger.warn("Could not parse text as JSON, returning null");
+        return null; // Keep null return on error
+      }
+
+      // Ensure we have a non-null object that's not an array
+      if (jsonData && typeof jsonData === 'object' && !Array.isArray(jsonData)) {
+        return jsonData;
+      }
+
+      // logger.warn("Could not parse text as JSON object, returning null");
+      return null; // Return null if not a valid object
+    }
+
+    /**
+     * Normalizes a JSON-like string by correcting formatting issues:
+     * - Removes extra spaces after '{' and before '}'.
+     * - Wraps unquoted values in double quotes.
+     * - Converts single-quoted values to double-quoted.
+     * - Ensures consistency in key-value formatting.
+     * - Normalizes mixed adjacent quote pairs.
+     *
+     * This is useful for cleaning up improperly formatted JSON strings
+     * before parsing them into valid JSON.
+     *
+     * @param str - The JSON-like string to normalize.
+     * @returns A properly formatted JSON string.
+     */
+
+    function normalizeJsonString(str: string) {
+      // Remove extra spaces after '{' and before '}'
+      str = str.replace(/\{\s+/, '{').replace(/\s+\}/, '}').trim();
+
+      // "key": unquotedValue → "key": "unquotedValue"
+      str = str.replace(/("[\w\d_-]+")\s*: \s*(?!"|\[)([\s\S]+?)(?=(,\s*"|\}$))/g, '$1: "$2"');
+
+      // "key": 'value' → "key": "value"
+      str = str.replace(/"([^"]+)"\s*:\s*'([^']*)'/g, (_, key, value) => `"${key}": "${value}"`);
+
+      // "key": someWord → "key": "someWord"
+      str = str.replace(/("[\w\d_-]+")\s*:\s*([A-Za-z_]+)(?!["\w])/g, '$1: "$2"');
+
+      return str;
+    }
+
+    type JSONValue = string | number | boolean | null | JSONValue[] | { [key: string]: JSONValue };
+
+    type ActionResponse = {
+      like: boolean;
+      retweet: boolean;
+      quote?: boolean;
+      reply?: boolean;
+    };
+
+    /**
+     * Truncate text to fit within the character limit, ensuring it ends at a complete sentence.
+     */
+    function truncateToCompleteSentence(text: string, maxLength: number): string {
+      if (text.length <= maxLength) {
+        return text;
+      }
+
+      // Attempt to truncate at the last period within the limit
+      const lastPeriodIndex = text.lastIndexOf('.', maxLength - 1);
+      if (lastPeriodIndex !== -1) {
+        const truncatedAtPeriod = text.slice(0, lastPeriodIndex + 1).trim();
+        if (truncatedAtPeriod.length > 0) {
+          return truncatedAtPeriod;
+        }
+      }
+
+      // If no period, truncate to the nearest whitespace within the limit
+      const lastSpaceIndex = text.lastIndexOf(' ', maxLength - 1);
+      if (lastSpaceIndex !== -1) {
+        const truncatedAtSpace = text.slice(0, lastSpaceIndex).trim();
+        if (truncatedAtSpace.length > 0) {
+          return `${truncatedAtSpace}...`;
+        }
+      }
+
+      // Fallback: Hard truncate and add ellipsis
+      const hardTruncated = text.slice(0, maxLength - 3).trim();
+      return `${hardTruncated}...`;
+    }
+
+    /**
+     * Splits a text into chunks of a specified size.
+     *
+     * @param content - The text to split into chunks.
+     * @param chunkSize - The maximum size of each chunk.
+     * @param bleed - The amount of overlap between chunks.
+     * @returns An array of chunks.
+     */
+    async function splitChunks(content: string, chunkSize = 512, bleed = 20): Promise<string[]> {
+      logger.debug('[splitChunks] Starting text split');
+
+      const characterstoTokens = 3.5;
+
+      const textSplitter = new RecursiveCharacterTextSplitter({
+        chunkSize: Number(Math.floor(chunkSize * characterstoTokens)),
+        chunkOverlap: Number(Math.floor(bleed * characterstoTokens)),
+      });
+
+      const chunks = await textSplitter.splitText(content);
+      logger.debug('[splitChunks] Split complete:', {
+        numberOfChunks: chunks.length,
+        averageChunkSize: chunks.reduce((acc, chunk) => acc + chunk.length, 0) / chunks.length,
+      });
+
+      return chunks;
+    }
+
+    /**
+     * Trims the provided text prompt to a specified token limit using a tokenizer model and type.
+     */
+    async function trimTokens(prompt: string, maxTokens: number, runtime: IAgentRuntime) {
+      if (!prompt) throw new Error('Trim tokens received a null prompt');
+
+      // if prompt is less than of maxtokens / 5, skip
+      if (prompt.length < maxTokens / 5) return prompt;
+
+      if (maxTokens <= 0) throw new Error('maxTokens must be positive');
+
+      const tokens = await runtime.useModel(ModelType.TEXT_TOKENIZER_ENCODE, {
+        prompt,
+      });
+
+      // If already within limits, return unchanged
+      if (tokens.length <= maxTokens) {
+        return prompt;
+      }
+
+      // Keep the most recent tokens by slicing from the end
+      const truncatedTokens = tokens.slice(-maxTokens);
+
+      // Decode back to text
+      return await runtime.useModel(ModelType.TEXT_TOKENIZER_DECODE, {
+        tokens: truncatedTokens,
+      });
+    }
+
+    /**
+     * Returns a replacer function for JSON.stringify that handles circular references.
+     */
+    function safeReplacer() {
+      const seen = new WeakSet();
+      return function (key: string, value: any) {
+        if (typeof value === 'object' && value !== null) {
+          if (seen.has(value)) {
+            return '[Circular]';
+          }
+          seen.add(value);
+        }
+        return value;
+      };
+    }
+
+    /**
+     * Parses a string to determine its boolean equivalent.
+     *
+     * Recognized affirmative values: "YES", "Y", "TRUE", "T", "1", "ON", "ENABLE"
+     * Recognized negative values: "NO", "N", "FALSE", "F", "0", "OFF", "DISABLE"
+     *
+     * @param {string | undefined | null} value - The input text to parse
+     * @returns {boolean} - Returns `true` for affirmative inputs, `false` for negative or unrecognized inputs
+     */
+    function parseBooleanFromText(value: string | undefined | null): boolean {
+      if (!value) return false;
+
+      const affirmative = ['YES', 'Y', 'TRUE', 'T', '1', 'ON', 'ENABLE'];
+      const negative = ['NO', 'N', 'FALSE', 'F', '0', 'OFF', 'DISABLE'];
+
+      const normalizedText = value.trim().toUpperCase();
+
+      if (affirmative.includes(normalizedText)) {
+        return true;
+      }
+      if (negative.includes(normalizedText)) {
+        return false;
+      }
+
+      // For environment variables, we'll treat unrecognized values as false
+      return false;
+    }
+
+    // RAG (Retrieval Augmented Generation) Utils
+
+    /**
+     * Optimizes a set of knowledge items for large context models by applying various transformations.
+     *
+     * @param knowledgeItems Array of knowledge items to be optimized
+     * @param query The original query string
+     * @param options Configuration options for the optimization
+     * @returns Optimized knowledge text formatted for the model
+     */
+    function optimizeKnowledgeForLLM(
+      knowledgeItems: Array<{ content: { text: string }; score?: number }>,
+      query: string | undefined,
+      options: {
+        maxItems?: number;
+        maxTokens?: number;
+        charsPerToken?: number;
+        includeScores?: boolean;
+        includeMeta?: boolean;
+      } = {}
+    ): string {
+      const {
+        maxItems = 10,
+        maxTokens = 8000,
+        charsPerToken = 3.5,
+        includeScores = true,
+        includeMeta = true,
+      } = options;
+
+      // Early exit if no knowledge items
+      if (!knowledgeItems || knowledgeItems.length === 0) {
+        return '';
+      }
+
+      // Limit to specified number of items
+      const limitedItems = knowledgeItems.slice(0, maxItems);
+
+      // Format the items with clear separation and structure
+      const formattedItems = limitedItems
+        .map((item, index) => {
+          const score =
+            item.score !== undefined && includeScores
+              ? ` (relevance: ${item.score.toFixed(3)})`
+              : '';
+          return `## Source ${index + 1}${score}\n${item.content.text}`;
+        })
+        .join('\n\n');
+
+      // Create the knowledge section with header
+      let knowledgeText = `# Relevant Knowledge\n\n${formattedItems}`;
+
+      // Add metadata if requested
+      if (includeMeta) {
+        const trimmedQuery = query ? query.substring(0, 100) : 'No query provided';
+        const metaHeader = `# Knowledge Context\n- Total sources: ${limitedItems.length}\n- Query: "${trimmedQuery}"\n\n`;
+        knowledgeText = metaHeader + knowledgeText;
+      }
+
+      // Check token length and truncate if necessary
+      const estimatedTokens = knowledgeText.length / charsPerToken;
+      if (estimatedTokens > maxTokens) {
+        logger.debug(
+          `RAG: Knowledge exceeds token limit (${Math.round(estimatedTokens)}), truncating to ${maxTokens} tokens`
+        );
+        knowledgeText = knowledgeText.slice(0, Math.floor(maxTokens * charsPerToken));
+      }
+
+      return knowledgeText;
+    }
+
+    /**
+     * Analyzes the effectiveness of knowledge retrieval by comparing the query and response
+     * to determine if the knowledge was actually utilized effectively.
+     *
+     * @param query The original query that triggered knowledge retrieval
+     * @param response The LLM's response text
+     * @param knowledgeItems The knowledge items that were provided to the LLM
+     * @returns Analysis object with metrics and suggestions
+     */
+    function analyzeKnowledgeUtilization(
+      query: string,
+      response: string,
+      knowledgeItems: Array<{ content: { text: string }; score?: number }>
+    ): {
+      utilizationScore: number;
+      knowledgeApplied: boolean;
+      suggestedImprovements?: string[];
+    } {
+      // Simple implementation - could be expanded with more sophisticated analysis
+      const knowledgeTexts = knowledgeItems.map((item) => item.content.text.toLowerCase());
+      const responseLower = response.toLowerCase();
+      const queryLower = query.toLowerCase();
+
+      // Check if knowledge content appears in the response
+      let contentMatches = 0;
+      for (const text of knowledgeTexts) {
+        // Look for substantial phrases from the knowledge in the response
+        const phrases = text.split(/[.!?\n]/).filter((phrase) => phrase.trim().length > 15);
+
+        for (const phrase of phrases) {
+          if (responseLower.includes(phrase.trim().toLowerCase())) {
+            contentMatches++;
+            break;
+          }
+        }
+      }
+
+      // Calculate utilization score (0-1)
+      const utilizationScore =
+        knowledgeItems.length > 0
+          ? Math.min(1, contentMatches / Math.min(3, knowledgeItems.length))
+          : 0;
+
+      // Determine if knowledge was meaningfully applied
+      const knowledgeApplied = utilizationScore > 0.3;
+
+      // Generate improvement suggestions
+      const suggestedImprovements: string[] = [];
+
+      if (utilizationScore < 0.3) {
+        suggestedImprovements.push(
+          'Knowledge retrieval appears ineffective - consider refining the query or knowledge base'
+        );
+      }
+
+      if (knowledgeItems.length === 0) {
+        suggestedImprovements.push(
+          'No knowledge items were retrieved - knowledge base may be missing relevant information'
+        );
+      }
+
+      logger.debug(
+        `RAG Analysis: Utilization score ${utilizationScore.toFixed(2)}, knowledge applied: ${knowledgeApplied}`
+      );
+
+      return {
+        utilizationScore,
+        knowledgeApplied,
+        suggestedImprovements: suggestedImprovements.length > 0 ? suggestedImprovements : undefined,
+      };
+    }
+
+    // UUID Utils
+
+    const uuidSchema = z.string().uuid() as z.ZodType<UUID>;
+
+    /**
+     * Validates a UUID value.
+     *
+     * @param {unknown} value - The value to validate.
+     * @returns {UUID | null} Returns the validated UUID value or null if validation fails.
+     */
+    function validateUuid(value: unknown): UUID | null {
+      const result = uuidSchema.safeParse(value);
+      return result.success ? result.data : null;
+    }
+
+    /**
+     * Converts a string or number to a UUID.
+     *
+     * @param {string | number} target - The string or number to convert to a UUID.
+     * @returns {UUID} The UUID generated from the input target.
+     * @throws {TypeError} Throws an error if the input target is not a string.
+     */
+    function stringToUuid(target: string | number): UUID {
+      if (typeof target === 'number') {
+        target = (target as number).toString();
+      }
+
+      if (typeof target !== 'string') {
+        throw TypeError('Value must be string');
+      }
+
+      const _uint8ToHex = (ubyte: number): string => {
+        const first = ubyte >> 4;
+        const second = ubyte - (first << 4);
+        const HEX_DIGITS = '0123456789abcdef'.split('');
+        return HEX_DIGITS[first] + HEX_DIGITS[second];
+      };
+
+      const _uint8ArrayToHex = (buf: Uint8Array): string => {
+        let out = '';
+        for (let i = 0; i < buf.length; i++) {
+          out += _uint8ToHex(buf[i]);
+        }
+        return out;
+      };
+
+      const escapedStr = encodeURIComponent(target);
+      const buffer = new Uint8Array(escapedStr.length);
+      for (let i = 0; i < escapedStr.length; i++) {
+        buffer[i] = escapedStr[i].charCodeAt(0);
+      }
+
+      const hash = sha1(buffer);
+      const hashBuffer = new Uint8Array(hash.length / 2);
+      for (let i = 0; i < hash.length; i += 2) {
+        hashBuffer[i / 2] = Number.parseInt(hash.slice(i, i + 2), 16);
+      }
+
+      return `${_uint8ArrayToHex(hashBuffer.slice(0, 4))}-${_uint8ArrayToHex(hashBuffer.slice(4, 6))}-${_uint8ToHex(hashBuffer[6] & 0x0f)}${_uint8ToHex(hashBuffer[7])}-${_uint8ToHex((hashBuffer[8] & 0x3f) | 0x80)}${_uint8ToHex(hashBuffer[9])}-${_uint8ArrayToHex(hashBuffer.slice(10, 16))}` as UUID;
+    }
+
+    /**
+     * Gets the base URL for a provider API.
+     *
+     * @param {IAgentRuntime} runtime - The agent runtime instance
+     * @param {string} provider - The provider name (e.g., 'redpill', 'openai')
+     * @param {string} defaultBaseURL - The default base URL to use for the provider
+     * @returns {string} The base URL for the provider API
+     */
+
+    // Placeholder function until all LLM plugins are fixed and published
+    function getProviderBaseURL(
+      runtime: IAgentRuntime,
+      provider: string,
+      defaultBaseURL: string
+    ): string {
+      return defaultBaseURL;
+    }
+  } catch (error) {
+    logger.error('Error in parseKeyValueXml:', { error });
     return null;
   }
+}
 
-  return result;
+// -----------------------------------------------------------------------------
+// RAG Utilities
+// -----------------------------------------------------------------------------
+
+/**
+ * Utilities for Retrieval Augmented Generation (RAG) in Eliza
+ */
+
+// Local type definition to match EnhancedMetadata from plugin-bootstrap
+// This avoids cross-package import issues in monorepo
+export type EnhancedMetadata = {
+  source?: string;
+  title?: string;
+  section?: string;
+  [key: string]: any;
+};
+
+// Function to extract significant phrases for utilization analysis
+export const extractSignificantPhrases = (text: string): string[] => {
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  return sentences
+    .map((s) => s.trim())
+    .filter((s) => s.split(/\s+/).length >= 5)
+    .map((s) => {
+      const words = s.split(/\s+/);
+      if (words.length > 7) {
+        const mid = Math.floor(words.length / 2);
+        return words.slice(mid - 2, mid + 3).join(' ');
+      }
+      return s;
+    });
+};
+
+/**
+ * Optimizes knowledge items for large language models by formatting them
+ * in a structured way that's easier for models to understand.
+ *
+ * @param items - Array of knowledge items to optimize
+ * @param query - Original user query for context
+ * @returns Formatted knowledge text optimized for LLM understanding
+ */
+export function optimizeKnowledgeForLLM(items: KnowledgeItem[], query: string): string {
+  if (!items || items.length === 0) {
+    return '';
+  }
+
+  // Sort knowledge items by relevance (if score is available)
+  const sortedItems = [...items].sort((a, b) => {
+    // Note: score may not be present on all KnowledgeItems
+    const scoreA = (a as any).score !== undefined ? (a as any).score : 0;
+    // Note: score may not be present on all KnowledgeItems
+    const scoreB = (b as any).score !== undefined ? (b as any).score : 0;
+    return scoreB - scoreA;
+  });
+
+  // Create XML-structured format for knowledge context
+  let formattedKnowledge = `<query>${query}</query>\n\n<knowledge_items>\n`;
+
+  sortedItems.forEach((item, index) => {
+    const source = item.metadata?.source || 'Unknown';
+    // Type assertion to EnhancedMetadata for title/section access
+    const enhancedMetadata = item.metadata as EnhancedMetadata;
+    const title = enhancedMetadata?.title || '';
+    const section = enhancedMetadata?.section ? ` (${enhancedMetadata.section})` : '';
+    // Note: score may not be present on all KnowledgeItems
+    const relevance = (item as any).score !== undefined ? (item as any).score.toFixed(4) : 'N/A';
+
+    formattedKnowledge += `<knowledge item="${index + 1}">\n`;
+    formattedKnowledge += `<content>${item.content}</content>\n`;
+    formattedKnowledge += `<source>${source}${title ? ` - ${title}` : ''}${section}</source>\n`;
+    formattedKnowledge += `<relevance>${relevance}</relevance>\n`;
+    formattedKnowledge += '</knowledge>\n\n';
+  });
+
+  formattedKnowledge += '</knowledge_items>\n\n';
+  formattedKnowledge += '<instructions>\n';
+  formattedKnowledge += 'Use the knowledge items above to answer the query accurately.\n';
+  formattedKnowledge +=
+    "If the knowledge doesn't contain the answer, acknowledge that you don't know.\n";
+  formattedKnowledge += 'When using information from the knowledge, include the source.\n';
+  formattedKnowledge += '</instructions>';
+
+  return formattedKnowledge;
 }
 
 /**
- * Parses a JSON object from a given text. The function looks for a JSON block wrapped in triple backticks
- * with `json` language identifier, and if not found, it searches for an object pattern within the text.
- * It then attempts to parse the JSON string into a JavaScript object. If parsing is successful and the result
- * is an object (but not an array), it returns the object; otherwise, it tries to parse an array if the result
- * is an array, or returns null if parsing is unsuccessful or the result is neither an object nor an array.
+ * Analyzes how effectively the LLM utilized provided knowledge in its response
+ * and returns metrics about the knowledge utilization.
  *
- * @param text - The input text from which to extract and parse the JSON object.
- * @returns An object parsed from the JSON string if successful; otherwise, null or the result of parsing an array.
+ * @param response - The LLM's response to analyze
+ * @param items - The knowledge items that were provided to the LLM
+ * @param query - The original user query
+ * @returns Analysis object with utilization metrics
  */
-export function parseJSONObjectFromText(text: string): Record<string, any> | null {
-  let jsonData = null;
-  const jsonBlockMatch = text.match(jsonBlockPattern);
+export function analyzeKnowledgeUtilization(
+  response: string,
+  items: KnowledgeItem[],
+  query: string
+): {
+  knowledgeUsed: boolean;
+  citationsIncluded: boolean;
+  confidence: number;
+  topItemId?: string;
+} {
+  if (!response || !items || items.length === 0) {
+    return {
+      knowledgeUsed: false,
+      citationsIncluded: false,
+      confidence: 0,
+    };
+  }
+
+  // Normalize text for comparison
+  const normalizedResponse = response.toLowerCase();
+
+  // Check for citation markers
+  const hasCitations =
+    normalizedResponse.includes('source:') ||
+    normalizedResponse.includes('reference:') ||
+    normalizedResponse.includes('according to') ||
+    normalizedResponse.includes('citation');
+
+  // Track if any knowledge was used and which item had the most matching phrases
+  let knowledgeUsed = false;
+  let maxMatchCount = 0;
+  let topItemIndex = -1;
+
+  // Define extractSignificantPhrases locally to ensure it's callable
+  function extractSignificantPhrases(text: string): string[] {
+    // Simple implementation to extract phrases - this can be refined later
+    return text.split(/[.,\n\s]+/).filter((phrase) => phrase.length > 3);
+  }
+
+  // Check each knowledge item for usage in response
+  items.forEach((item, index) => {
+    if (!item.content) return;
+
+    // Use the local function to extract phrases
+    const contentText =
+      typeof item.content === 'string'
+        ? item.content
+        : item.content && typeof item.content.text === 'string'
+          ? item.content.text
+          : '';
+    const significantPhrases = extractSignificantPhrases(contentText.toLowerCase());
+
+    // Count how many phrases from this item appear in the response
+    const matchCount = significantPhrases.filter((phrase) =>
+      normalizedResponse.includes(phrase)
+    ).length;
+
+    // If we found any matches, knowledge was used
+    if (matchCount > 0) {
+      knowledgeUsed = true;
+
+      // Track which item had the most matches
+      if (matchCount > maxMatchCount) {
+        maxMatchCount = matchCount;
+        topItemIndex = index;
+      }
+    }
+  });
+
+  // Calculate confidence score (0-1) based on matches and citations
+  const matchConfidence = maxMatchCount > 0 ? Math.min(1, maxMatchCount / 3) : 0;
+  const citationBonus = hasCitations ? 0.2 : 0;
+  const confidence = Math.min(1, matchConfidence + citationBonus);
+
+  return {
+    knowledgeUsed,
+    citationsIncluded: hasCitations,
+    confidence,
+    topItemId: topItemIndex >= 0 ? items[topItemIndex].id : undefined,
+  };
+}
+
+/**
+ * Parses XML structure in LLM responses, useful for extracting
+ * structured information from RAG-enhanced responses.
+ *
+ * @param text - Text containing XML to parse
+ * @param tagName - XML tag to extract (optional)
+ * @returns Extracted content or object structure
+ */
+export function parseXmlContent(
+  text: string,
+  tagName?: string
+): string | Record<string, string> | null {
+  if (!text) return null;
 
   try {
-    if (jsonBlockMatch) {
-      // Parse the JSON from inside the code block
-      jsonData = JSON.parse(normalizeJsonString(jsonBlockMatch[1].trim()));
+    if (tagName) {
+      // Extract content from specific tag
+      const tagRegex = new RegExp(`<${tagName}>([\s\S]*?)<\/${tagName}>`, 'i');
+      const match = text.match(tagRegex);
+      return match ? match[1].trim() : null;
     } else {
-      // Try to parse the text directly if it's not in a code block
-      jsonData = JSON.parse(normalizeJsonString(text.trim()));
+      // Extract all tags and their content
+      const result: Record<string, string> = {};
+      const tagPattern = /<([a-zA-Z0-9_]+)>([\s\S]*?)<\/\1>/g;
+      let match;
+
+      while ((match = tagPattern.exec(text)) !== null) {
+        const [, key, value] = match;
+        if (key && value !== undefined) {
+          result[key] = value.trim();
+        }
+      }
+
+      return Object.keys(result).length > 0 ? result : null;
     }
-  } catch (_e) {
-    // logger.warn("Could not parse text as JSON, returning null");
-    return null; // Keep null return on error
+  } catch (error) {
+    logger.error('Error parsing XML content', { error });
+    return null;
   }
-
-  // Ensure we have a non-null object that's not an array
-  if (jsonData && typeof jsonData === 'object' && !Array.isArray(jsonData)) {
-    return jsonData;
-  }
-
-  // logger.warn("Could not parse text as JSON object, returning null");
-  return null; // Return null if not a valid object
 }
 
+// -----------------------------------------------------------------------------
+// XML Handling
+// -----------------------------------------------------------------------------
+
 /**
- * Normalizes a JSON-like string by correcting formatting issues:
- * - Removes extra spaces after '{' and before '}'.
- * - Wraps unquoted values in double quotes.
- * - Converts single-quoted values to double-quoted.
- * - Ensures consistency in key-value formatting.
- * - Normalizes mixed adjacent quote pairs.
+ * Advanced XML response handling utilities to improve RAG integration.
+ * These utilities help with generating, parsing, and validating XML responses
+ * that work consistently across different LLM providers.
+ */
+
+/**
+ * Extracts all XML tags and their content from a text.
  *
- * This is useful for cleaning up improperly formatted JSON strings
- * before parsing them into valid JSON.
+ * @param text - The text to extract XML tags from
+ * @returns An array of objects with tagName and content properties
+ */
+export function extractXmlTags(text: string): Array<{ tagName: string; content: string }> {
+  const tags: Array<{ tagName: string; content: string }> = [];
+  const regex = /<([a-zA-Z0-9_]+)>(([\s\S]*?))<\/\1>/g;
+
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    tags.push({
+      tagName: match[1],
+      content: match[2],
+    });
+  }
+
+  return tags;
+}
+
+/**
+ * Enhances the response content by emphasizing knowledge references and citing sources.
+ * This helps make RAG responses more transparent about their information sources.
  *
- * @param str - The JSON-like string to normalize.
- * @returns A properly formatted JSON string.
+ * @param responseText - The LLM's response text to enhance
+ * @param knowledgeItems - The knowledge items used for retrieval
+ * @returns Enhanced response with source citations
  */
-
-export const normalizeJsonString = (str: string) => {
-  // Remove extra spaces after '{' and before '}'
-  str = str.replace(/\{\s+/, '{').replace(/\s+\}/, '}').trim();
-
-  // "key": unquotedValue → "key": "unquotedValue"
-  str = str.replace(/("[\w\d_-]+")\s*: \s*(?!"|\[)([\s\S]+?)(?=(,\s*"|\}$))/g, '$1: "$2"');
-
-  // "key": 'value' → "key": "value"
-  str = str.replace(/"([^"]+)"\s*:\s*'([^']*)'/g, (_, key, value) => `"${key}": "${value}"`);
-
-  // "key": someWord → "key": "someWord"
-  str = str.replace(/("[\w\d_-]+")\s*:\s*([A-Za-z_]+)(?!["\w])/g, '$1: "$2"');
-
-  return str;
-};
-
-export type ActionResponse = {
-  like: boolean;
-  retweet: boolean;
-  quote?: boolean;
-  reply?: boolean;
-};
-
-/**
- * Truncate text to fit within the character limit, ensuring it ends at a complete sentence.
- */
-export function truncateToCompleteSentence(text: string, maxLength: number): string {
-  if (text.length <= maxLength) {
-    return text;
+export function enhanceResponseWithSources(
+  responseText: string,
+  knowledgeItems: Array<{ id: string; content: { text: string } }>
+): string {
+  // If no knowledge items or response, return the original
+  if (!knowledgeItems?.length || !responseText) {
+    return responseText;
   }
 
-  // Attempt to truncate at the last period within the limit
-  const lastPeriodIndex = text.lastIndexOf('.', maxLength - 1);
-  if (lastPeriodIndex !== -1) {
-    const truncatedAtPeriod = text.slice(0, lastPeriodIndex + 1).trim();
-    if (truncatedAtPeriod.length > 0) {
-      return truncatedAtPeriod;
+  let enhancedResponse = responseText;
+
+  // Extract any text tag for special treatment
+  const textTags = extractXmlTags(responseText).filter((tag) => tag.tagName === 'text');
+
+  if (textTags.length > 0) {
+    // We have a text tag to enhance with sources
+    const originalTextContent = textTags[0].content;
+    let enhancedTextContent = originalTextContent;
+
+    // For each knowledge item, check if chunks of it appear in the response
+    // and add source references
+    knowledgeItems.forEach((item, index) => {
+      // Split knowledge into sentences to check for partial matches
+      const sentences = item.content.text.split(/(?<=[.!?])\s+/);
+
+      sentences.forEach((sentence) => {
+        if (sentence.length > 30) {
+          // Only process substantial sentences
+          // Check if a significant portion of the sentence appears in the response
+          const sentenceWords = sentence.split(/\s+/).filter((word) => word.length > 4);
+
+          const sentenceInResponse = sentenceWords.some((word) =>
+            enhancedTextContent.toLowerCase().includes(word.toLowerCase())
+          );
+
+          if (sentenceInResponse) {
+            // Add a source reference if we haven't already referenced this source
+            if (!enhancedTextContent.includes(`[Source ${index + 1}]`)) {
+              // Find a good location to insert the source reference
+              // Prefer end of paragraphs where the knowledge is used
+              const paragraphs = enhancedTextContent.split('\n');
+
+              for (let i = 0; i < paragraphs.length; i++) {
+                if (
+                  sentenceWords.some((word) =>
+                    paragraphs[i].toLowerCase().includes(word.toLowerCase())
+                  )
+                ) {
+                  // Add source reference at the end of this paragraph
+                  paragraphs[i] = paragraphs[i] + ` [Source ${index + 1}]`;
+                  enhancedTextContent = paragraphs.join('\n');
+                  break;
+                }
+              }
+            }
+          }
+        }
+      });
+    });
+
+    // If we modified the text content, update the response
+    if (enhancedTextContent !== originalTextContent) {
+      enhancedResponse = responseText.replace(
+        `<text>${originalTextContent}</text>`,
+        `<text>${enhancedTextContent}</text>`
+      );
+
+      // Add a sources section if not already present
+      if (!enhancedResponse.includes('<sources>')) {
+        const sourcesText = knowledgeItems
+          .map((item, index) => `[Source ${index + 1}]: ${item.content.text.substring(0, 100)}...`)
+          .join('\n');
+
+        enhancedResponse = enhancedResponse.replace(
+          '</text>',
+          '</text>\n<sources>\n' + sourcesText + '\n</sources>'
+        );
+      }
     }
   }
 
-  // If no period, truncate to the nearest whitespace within the limit
-  const lastSpaceIndex = text.lastIndexOf(' ', maxLength - 1);
-  if (lastSpaceIndex !== -1) {
-    const truncatedAtSpace = text.slice(0, lastSpaceIndex).trim();
-    if (truncatedAtSpace.length > 0) {
-      return `${truncatedAtSpace}...`;
-    }
-  }
-
-  // Fallback: Hard truncate and add ellipsis
-  const hardTruncated = text.slice(0, maxLength - 3).trim();
-  return `${hardTruncated}...`;
-}
-
-export async function splitChunks(content: string, chunkSize = 512, bleed = 20): Promise<string[]> {
-  logger.debug('[splitChunks] Starting text split');
-
-  const characterstoTokens = 3.5;
-
-  const textSplitter = new RecursiveCharacterTextSplitter({
-    chunkSize: Number(Math.floor(chunkSize * characterstoTokens)),
-    chunkOverlap: Number(Math.floor(bleed * characterstoTokens)),
-  });
-
-  const chunks = await textSplitter.splitText(content);
-  logger.debug('[splitChunks] Split complete:', {
-    numberOfChunks: chunks.length,
-    averageChunkSize: chunks.reduce((acc, chunk) => acc + chunk.length, 0) / chunks.length,
-  });
-
-  return chunks;
+  return enhancedResponse;
 }
 
 /**
- * Trims the provided text prompt to a specified token limit using a tokenizer model and type.
+ * Validates that an XML response contains required tags and follows expected format.
+ *
+ * @param xml - The XML response to validate
+ * @param requiredTags - Array of tag names that must be present
+ * @returns Object with validation result and any error messages
  */
-export async function trimTokens(prompt: string, maxTokens: number, runtime: IAgentRuntime) {
-  if (!prompt) throw new Error('Trim tokens received a null prompt');
+export function validateXmlResponse(
+  xml: string,
+  requiredTags: string[] = ['thought', 'text']
+): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
 
-  // if prompt is less than of maxtokens / 5, skip
-  if (prompt.length < maxTokens / 5) return prompt;
+  // Check for malformed XML (unclosed tags, etc.)
+  const openingTags: Record<string, number> = {};
+  const closingTags: Record<string, number> = {};
 
-  if (maxTokens <= 0) throw new Error('maxTokens must be positive');
+  for (const tag of requiredTags) {
+    const openRegex = new RegExp(`<${tag}>`, 'g');
+    const closeRegex = new RegExp(`</${tag}>`, 'g');
 
-  const tokens = await runtime.useModel(ModelType.TEXT_TOKENIZER_ENCODE, {
-    prompt,
-  });
+    openingTags[tag] = (xml.match(openRegex) || []).length;
+    closingTags[tag] = (xml.match(closeRegex) || []).length;
 
-  // If already within limits, return unchanged
-  if (tokens.length <= maxTokens) {
+    if (openingTags[tag] === 0) {
+      errors.push(`Missing required tag: <${tag}>`);
+    }
+
+    if (openingTags[tag] !== closingTags[tag]) {
+      errors.push(
+        `Mismatched tags for <${tag}>: ${openingTags[tag]} opening and ${closingTags[tag]} closing tags`
+      );
+    }
+  }
+
+  // Check for correct nesting
+  const extractedTags = extractXmlTags(xml);
+  const foundTags = new Set(extractedTags.map((t) => t.tagName));
+
+  for (const tag of requiredTags) {
+    if (!foundTags.has(tag)) {
+      errors.push(`Required tag <${tag}> not properly formatted or nested`);
+    }
+  }
+
+  // Log any errors for debugging
+  if (errors.length > 0) {
+    logger.warn(`XML validation errors detected:`, { errors, xml: xml.substring(0, 500) });
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
+}
+
+/**
+ * Formats a prompt with knowledge context in a way that's optimized for RAG.
+ * This ensures the knowledge is properly formatted and emphasized in the prompt.
+ *
+ * @param prompt - The base prompt to enhance
+ * @param knowledge - The knowledge context to add
+ * @returns Enhanced prompt with knowledge formatted for better RAG performance
+ */
+export function formatPromptWithKnowledge(prompt: string, knowledge: string): string {
+  // Only process if we have knowledge to add
+  if (!knowledge) {
     return prompt;
   }
 
-  // Keep the most recent tokens by slicing from the end
-  const truncatedTokens = tokens.slice(-maxTokens);
+  // Look for special markers in the prompt where knowledge should be inserted
+  if (prompt.includes('{{KNOWLEDGE}}')) {
+    return prompt.replace('{{KNOWLEDGE}}', knowledge);
+  }
 
-  // Decode back to text
-  return await runtime.useModel(ModelType.TEXT_TOKENIZER_DECODE, {
-    tokens: truncatedTokens,
-  });
-}
+  // If no markers found, append knowledge in a structured way
+  // First, try to find an XML tag where knowledge would fit best
+  const contextTags = ['context', 'background', 'user-query'];
 
-export function safeReplacer() {
-  const seen = new WeakSet();
-  return function (key: string, value: any) {
-    if (typeof value === 'object' && value !== null) {
-      if (seen.has(value)) {
-        return '[Circular]';
-      }
-      seen.add(value);
+  for (const tag of contextTags) {
+    const match = new RegExp(`<${tag}>(([\s\S]*?))<\/${tag}>`).exec(prompt);
+    if (match) {
+      // Insert knowledge after this tag
+      const insertPosition = match.index + match[0].length;
+      let enhancedPrompt = [
+        prompt.slice(0, insertPosition),
+        '\n\n',
+        knowledge,
+        prompt.slice(insertPosition),
+      ].join('');
+      return enhancedPrompt;
     }
-    return value;
-  };
-}
-
-/**
- * Parses a string to determine its boolean equivalent.
- *
- * Recognized affirmative values: "YES", "Y", "TRUE", "T", "1", "ON", "ENABLE"
- * Recognized negative values: "NO", "N", "FALSE", "F", "0", "OFF", "DISABLE"
- *
- * @param {string | undefined | null} value - The input text to parse
- * @returns {boolean} - Returns `true` for affirmative inputs, `false` for negative or unrecognized inputs
- */
-export function parseBooleanFromText(value: string | undefined | null): boolean {
-  if (!value) return false;
-
-  const affirmative = ['YES', 'Y', 'TRUE', 'T', '1', 'ON', 'ENABLE'];
-  const negative = ['NO', 'N', 'FALSE', 'F', '0', 'OFF', 'DISABLE'];
-
-  const normalizedText = value.trim().toUpperCase();
-
-  if (affirmative.includes(normalizedText)) {
-    return true;
-  }
-  if (negative.includes(normalizedText)) {
-    return false;
   }
 
-  // For environment variables, we'll treat unrecognized values as false
-  return false;
-}
-
-// UUID Utils
-
-const uuidSchema = z.string().uuid() as z.ZodType<UUID>;
-
-/**
- * Validates a UUID value.
- *
- * @param {unknown} value - The value to validate.
- * @returns {UUID | null} Returns the validated UUID value or null if validation fails.
- */
-export function validateUuid(value: unknown): UUID | null {
-  const result = uuidSchema.safeParse(value);
-  return result.success ? result.data : null;
-}
-
-/**
- * Converts a string or number to a UUID.
- *
- * @param {string | number} target - The string or number to convert to a UUID.
- * @returns {UUID} The UUID generated from the input target.
- * @throws {TypeError} Throws an error if the input target is not a string.
- */
-export function stringToUuid(target: string | number): UUID {
-  if (typeof target === 'number') {
-    target = (target as number).toString();
-  }
-
-  if (typeof target !== 'string') {
-    throw TypeError('Value must be string');
-  }
-
-  const _uint8ToHex = (ubyte: number): string => {
-    const first = ubyte >> 4;
-    const second = ubyte - (first << 4);
-    const HEX_DIGITS = '0123456789abcdef'.split('');
-    return HEX_DIGITS[first] + HEX_DIGITS[second];
-  };
-
-  const _uint8ArrayToHex = (buf: Uint8Array): string => {
-    let out = '';
-    for (let i = 0; i < buf.length; i++) {
-      out += _uint8ToHex(buf[i]);
-    }
-    return out;
-  };
-
-  const escapedStr = encodeURIComponent(target);
-  const buffer = new Uint8Array(escapedStr.length);
-  for (let i = 0; i < escapedStr.length; i++) {
-    buffer[i] = escapedStr[i].charCodeAt(0);
-  }
-
-  const hash = sha1(buffer);
-  const hashBuffer = new Uint8Array(hash.length / 2);
-  for (let i = 0; i < hash.length; i += 2) {
-    hashBuffer[i / 2] = Number.parseInt(hash.slice(i, i + 2), 16);
-  }
-
-  return `${_uint8ArrayToHex(hashBuffer.slice(0, 4))}-${_uint8ArrayToHex(hashBuffer.slice(4, 6))}-${_uint8ToHex(hashBuffer[6] & 0x0f)}${_uint8ToHex(hashBuffer[7])}-${_uint8ToHex((hashBuffer[8] & 0x3f) | 0x80)}${_uint8ToHex(hashBuffer[9])}-${_uint8ArrayToHex(hashBuffer.slice(10, 16))}` as UUID;
-}
-
-/**
- * Gets the base URL for a provider API.
- *
- * @param {IAgentRuntime} runtime - The agent runtime instance
- * @param {string} provider - The provider name (e.g., 'redpill', 'openai')
- * @param {string} defaultBaseURL - The default base URL to use for the provider
- * @returns {string} The base URL for the provider API
- */
-
-// Placeholder function untill all LLM plugins are fixed and published
-export function getProviderBaseURL(
-  runtime: IAgentRuntime,
-  provider: string,
-  defaultBaseURL: string
-): string {
-  return defaultBaseURL;
+  // If no suitable tags found, append to the end of the prompt with a clear separator
+  return `${prompt}\n\n--- RELEVANT KNOWLEDGE ---\n${knowledge}`;
 }

@@ -27,7 +27,6 @@ import {
   type PartialMessageReaction,
   type PartialUser,
   Partials,
-
   PermissionsBitField,
   type TextChannel,
   type User,
@@ -172,9 +171,11 @@ export class DiscordService extends Service implements IDiscordService {
     logger.error(`Discord connection error: ${error.message}`);
 
     // Check if the error is related to timeouts or WebSocket issues
-    if (error.message.includes('Timeout') ||
+    if (
+      error.message.includes('Timeout') ||
       error.message.includes('WebSocket') ||
-      error.message.includes('negative number')) {
+      error.message.includes('negative number')
+    ) {
       const token = this.runtime.getSetting('DISCORD_API_TOKEN') as string;
       this.attemptReconnect(token);
     }
@@ -194,7 +195,9 @@ export class DiscordService extends Service implements IDiscordService {
     this.isReconnecting = true;
 
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      logger.error(`Maximum reconnection attempts (${this.maxReconnectAttempts}) reached. Giving up.`);
+      logger.error(
+        `Maximum reconnection attempts (${this.maxReconnectAttempts}) reached. Giving up.`
+      );
       this.isReconnecting = false;
       this.client = null;
       return;
@@ -204,7 +207,9 @@ export class DiscordService extends Service implements IDiscordService {
     const delay = this.reconnectBaseDelay * Math.pow(2, this.reconnectAttempts);
     this.reconnectAttempts++;
 
-    logger.info(`Attempting to reconnect to Discord in ${delay / 1000} seconds (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+    logger.info(
+      `Attempting to reconnect to Discord in ${delay / 1000} seconds (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`
+    );
 
     // Schedule reconnection
     const timeout = setTimeout(() => {
@@ -215,7 +220,9 @@ export class DiscordService extends Service implements IDiscordService {
         try {
           this.client.destroy();
         } catch (e) {
-          logger.warn(`Error destroying Discord client: ${e instanceof Error ? e.message : String(e)}`);
+          logger.warn(
+            `Error destroying Discord client: ${e instanceof Error ? e.message : String(e)}`
+          );
         }
       }
 
@@ -224,7 +231,9 @@ export class DiscordService extends Service implements IDiscordService {
         this.initializeClient(token);
         this.isReconnecting = false;
       } catch (error) {
-        logger.error(`Failed to reconnect: ${error instanceof Error ? error.message : String(error)}`);
+        logger.error(
+          `Failed to reconnect: ${error instanceof Error ? error.message : String(error)}`
+        );
         this.isReconnecting = false;
         // Don't set client to null here to allow further reconnection attempts
       }
@@ -747,16 +756,16 @@ export class DiscordService extends Service implements IDiscordService {
                 },
                 discord: member.user.globalName
                   ? {
-                    username: tag,
-                    name: member.displayName || member.user.username,
-                    globalName: member.user.globalName,
-                    userId: member.id,
-                  }
+                      username: tag,
+                      name: member.displayName || member.user.username,
+                      globalName: member.user.globalName,
+                      userId: member.id,
+                    }
                   : {
-                    username: tag,
-                    name: member.displayName || member.user.username,
-                    userId: member.id,
-                  },
+                      username: tag,
+                      name: member.displayName || member.user.username,
+                      userId: member.id,
+                    },
               },
             });
           }
@@ -794,16 +803,16 @@ export class DiscordService extends Service implements IDiscordService {
                     },
                     discord: member.user.globalName
                       ? {
-                        username: tag,
-                        name: member.displayName || member.user.username,
-                        globalName: member.user.globalName,
-                        userId: member.id,
-                      }
+                          username: tag,
+                          name: member.displayName || member.user.username,
+                          globalName: member.user.globalName,
+                          userId: member.id,
+                        }
                       : {
-                        username: tag,
-                        name: member.displayName || member.user.username,
-                        userId: member.id,
-                      },
+                          username: tag,
+                          name: member.displayName || member.user.username,
+                          userId: member.id,
+                        },
                   },
                 });
               }
@@ -844,16 +853,16 @@ export class DiscordService extends Service implements IDiscordService {
                 },
                 discord: member.user.globalName
                   ? {
-                    username: tag,
-                    name: member.displayName || member.user.username,
-                    globalName: member.user.globalName,
-                    userId: member.id,
-                  }
+                      username: tag,
+                      name: member.displayName || member.user.username,
+                      globalName: member.user.globalName,
+                      userId: member.id,
+                    }
                   : {
-                    username: tag,
-                    name: member.displayName || member.user.username,
-                    userId: member.id,
-                  },
+                      username: tag,
+                      name: member.displayName || member.user.username,
+                      userId: member.id,
+                    },
               },
             });
           }
