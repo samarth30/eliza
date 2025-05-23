@@ -216,6 +216,48 @@ const messageReceivedHandler = async ({
           `[Bootstrap] Processing message: ${truncateToCompleteSentence(message.content.text || '', 50)}...`
         );
 
+        // Process image attachments and generate descriptions
+        if (message.content.attachments && message.content.attachments.length > 0) {
+          logger.debug('[Bootstrap] Processing image attachments for description');
+
+          for (const attachment of message.content.attachments) {
+            // Check if this is an image attachment that needs description
+            const isImage =
+              attachment.contentType?.startsWith('image/') ||
+              /\.(jpg|jpeg|png|gif|bmp|webp|avif)$/i.test(attachment.url);
+
+            if (isImage && (!attachment.description || !attachment.text)) {
+              try {
+                logger.debug(`[Bootstrap] Generating description for image: ${attachment.url}`);
+
+                const imageDescription = await runtime.useModel(ModelType.IMAGE_DESCRIPTION, {
+                  imageUrl: attachment.url,
+                  prompt:
+                    'Describe this image in detail, including any text, objects, people, actions, and context visible in the image.',
+                });
+
+                if (imageDescription && typeof imageDescription === 'object') {
+                  attachment.description = imageDescription.description || 'Image processed';
+                  attachment.text =
+                    imageDescription.title || imageDescription.description || 'Image content';
+                  logger.debug(`[Bootstrap] Generated description: ${attachment.description}`);
+                } else if (typeof imageDescription === 'string') {
+                  attachment.description = imageDescription;
+                  attachment.text = imageDescription;
+                  logger.debug(`[Bootstrap] Generated description: ${imageDescription}`);
+                }
+              } catch (error: any) {
+                logger.warn(
+                  `[Bootstrap] Failed to generate description for image ${attachment.url}: ${error instanceof Error ? error.message : String(error)}`
+                );
+                // Set fallback descriptions
+                attachment.description = attachment.description || 'Image attachment';
+                attachment.text = attachment.text || 'Image content';
+              }
+            }
+          }
+        }
+
         // First, save the incoming message
         logger.debug('[Bootstrap] Saving message to memory and embeddings');
         await Promise.all([
@@ -968,8 +1010,10 @@ const controlMessageHandler = async ({
     } else {
       logger.error('[controlMessageHandler] No WebSocket service found to send control message');
     }
-  } catch (error) {
-    logger.error(`[controlMessageHandler] Error processing control message: ${error}`);
+  } catch (error: any) {
+    logger.error(
+      `[controlMessageHandler] Error processing control message: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 };
 
@@ -1078,7 +1122,9 @@ const events = {
         }
         logger.info(`[Bootstrap] User ${payload.entityId} left world ${payload.worldId}`);
       } catch (error: any) {
-        logger.error(`[Bootstrap] Error handling user left: ${error.message}`);
+        logger.error(
+          `[Bootstrap] Error handling user left: ${error instanceof Error ? error.message : String(error)}`
+        );
       }
     },
   ],
