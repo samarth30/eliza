@@ -1,5 +1,4 @@
-import { validateUuid } from '@elizaos/core';
-import { logger } from '@elizaos/core';
+import { logger, validateUuid } from '@elizaos/core';
 import express from 'express';
 import type { AgentServer } from '..';
 
@@ -67,7 +66,7 @@ export function worldRouter(server?: AgentServer): express.Router {
 
   router.get('/:worldId/memories/:serverId', async (req, res) => {
     try {
-      const { serverId } = req.params;
+      const serverId = validateUuid(req.params.serverId);
       const memories = await db.getMemoriesByServerId({ serverId, count: 50 });
 
       res.json({

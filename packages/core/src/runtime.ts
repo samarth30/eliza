@@ -634,7 +634,10 @@ export class AgentRuntime implements IAgentRuntime {
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
         span.recordException(error as Error);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: errorMsg });
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: errorMsg,
+        });
         this.runtimeLogger.error(`Failed to add agent as participant: ${errorMsg}`);
         throw error;
       }
@@ -2395,6 +2398,10 @@ export class AgentRuntime implements IAgentRuntime {
     limit?: number;
   }): Promise<Memory[]> {
     return await this.adapter.getMemoriesByRoomIds(params);
+  }
+
+  async getMemoriesByServerId(params: { serverId: UUID; count?: number }): Promise<Memory[]> {
+    return await this.adapter.getMemoriesByServerId(params);
   }
 
   async getCachedEmbeddings(params: {

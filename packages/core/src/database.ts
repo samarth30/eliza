@@ -146,6 +146,8 @@ export abstract class DatabaseAdapter<DB = unknown> implements IDatabaseAdapter 
     limit?: number;
   }): Promise<Memory[]>;
 
+  abstract getMemoriesByServerId(params: { serverId: UUID; count?: number }): Promise<Memory[]>;
+
   abstract getMemoryById(id: UUID): Promise<Memory | null>;
 
   /**
